@@ -1,11 +1,14 @@
 """Reference resolution for personas and pages in test steps."""
 
+import logging
 import re
 from typing import Dict, Any, List, Tuple
 from sqlmodel import Session
 
 from db import crud
 from db.encryption import decrypt_password
+
+logger = logging.getLogger(__name__)
 
 # Pattern to detect password placeholders
 PASSWORD_PATTERN = r"\{\{\w+\.password\}\}"
@@ -77,6 +80,8 @@ def resolve_references(
     personas = {p.name: p for p in crud.get_personas_by_project(session, project_id)}
     pages = {p.name: p for p in crud.get_pages_by_project(session, project_id)}
 
+    logger.info(f"[resolver] project_id={project_id}, personas={list(personas.keys())}, pages={list(pages.keys())}")
+
     # Pattern matches {{word}} or {{word.word}}
     pattern = r"\{\{(\w+(?:\.\w+)?)\}\}"
 
@@ -91,11 +96,14 @@ def resolve_references(
                     return personas[name].username
                 elif field == "password":
                     try:
-                        return decrypt_password(personas[name].encrypted_password)
-                    except Exception:
-                        # Return original if decryption fails
+                        decrypted = decrypt_password(personas[name].encrypted_password)
+                        logger.info(f"[resolver] Decrypted password for '{name}': length={len(decrypted)}")
+                        return decrypted
+                    except Exception as e:
+                        logger.error(f"[resolver] Failed to decrypt password for '{name}': {e}")
                         return match.group(0)
             # Unknown persona or field - return original
+            logger.warning(f"[resolver] Persona '{name}' not found or unknown field '{field}'")
             return match.group(0)
         else:
             # Page reference: {{name}}
