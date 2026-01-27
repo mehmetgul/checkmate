@@ -26,11 +26,11 @@ class TestStepModel(BaseModel):
     action: ActionType = Field(description="The action to perform")
     target: Optional[str] = Field(
         default=None,
-        description="Element description (e.g., 'Login button', 'Email input field') - Playwright will find it"
+        description="Element description for click/type/hover/select/assert_element/assert_style. Must be null for navigate/fill_form/press_key/wait_for_page/screenshot/assert_text/back/evaluate."
     )
     value: Optional[str] = Field(
         default=None,
-        description="URL path, text to type, time in ms, expected text, or JSON for fill_form"
+        description="For navigate: URL path. For type/fill_form: text or JSON. For press_key: key name. For assert_text: expected text. For wait: time in ms. Must be null for click/hover/assert_element/back."
     )
     description: str = Field(description="Human-readable description of this step")
 
