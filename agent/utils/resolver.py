@@ -80,7 +80,7 @@ def resolve_references(
     personas = {p.name: p for p in crud.get_personas_by_project(session, project_id)}
     pages = {p.name: p for p in crud.get_pages_by_project(session, project_id)}
 
-    logger.info(f"[resolver] project_id={project_id}, personas={list(personas.keys())}, pages={list(pages.keys())}")
+    print(f"[resolver] project_id={project_id}, personas={list(personas.keys())}, pages={list(pages.keys())}")
 
     # Pattern matches {{word}} or {{word.word}}
     pattern = r"\{\{(\w+(?:\.\w+)?)\}\}"
@@ -97,13 +97,13 @@ def resolve_references(
                 elif field == "password":
                     try:
                         decrypted = decrypt_password(personas[name].encrypted_password)
-                        logger.info(f"[resolver] Decrypted password for '{name}': length={len(decrypted)}")
+                        print(f"[resolver] Decrypted password for '{name}': length={len(decrypted)}")
                         return decrypted
                     except Exception as e:
-                        logger.error(f"[resolver] Failed to decrypt password for '{name}': {e}")
+                        print(f"[resolver] Failed to decrypt password for '{name}': {e}")
                         return match.group(0)
             # Unknown persona or field - return original
-            logger.warning(f"[resolver] Persona '{name}' not found or unknown field '{field}'")
+            print(f"[resolver] Persona '{name}' not found or unknown field '{field}'")
             return match.group(0)
         else:
             # Page reference: {{name}}
