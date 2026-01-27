@@ -164,7 +164,7 @@ class TestRun(TestRunBase, table=True):
 
     project: Project = Relationship(back_populates="test_runs")
     test_case: Optional["TestCase"] = Relationship(back_populates="test_runs")
-    steps: List["TestRunStep"] = Relationship(back_populates="test_run")
+    steps: List["TestRunStep"] = Relationship(back_populates="test_run", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
 
 class TestRunCreate(TestRunBase):
