@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database (optional, use SQLite for quick dev)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: qa_testing
+      POSTGRES_USER: qa_user
+      POSTGRES_PASSWORD: qa_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    profiles:
+      - postgres
+
+  # FastAPI + LangGraph backend
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite:///./qa_testing.db
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      PLAYWRIGHT_EXECUTOR_URL: http://playwright-http:8932
+    depends_on:
+      - playwright-http
+    volumes:
+      - .:/app
+      - backend_data:/app/data
+
+  # Playwright HTTP Executor
+  playwright-http:
+    build: ../playwright-http
+    ports:
+      - "8932:8932"
+    environment:
+      AVAILABLE_BROWSERS: chromium-headless
+      BROWSER_TIMEOUT: 30000
+
+volumes:
+  postgres_data:
+  backend_data:
