@@ -8,25 +8,25 @@ from langchain_core.messages import AnyMessage
 """
 Supported actions mapped to Playwright:
 
-| Action        | Description                   | Parameters                           |
-|---------------|-------------------------------|--------------------------------------|
-| navigate      | Go to URL                     | value=URL                            |
-| click         | Click element                 | target=element description           |
-| type          | Type into field               | target=element, value=text           |
-| fill_form     | Fill multiple fields          | value=JSON {field: value}            |
-| select        | Select dropdown option        | target=element, value=option(s)      |
-| hover         | Hover over element            | target=element                       |
-| press_key     | Press keyboard key            | value=key name (Enter, Tab, etc)     |
-| wait          | Wait for element/text         | value=time(ms) OR target=text/element|
-| wait_for_page | Wait for page load            | value=load/domcontentloaded/networkidle|
-| screenshot    | Take screenshot               | value=filename (optional)            |
-| assert_text   | Verify text visible           | value=expected text                  |
-| assert_element| Verify element visible        | target=element                       |
-| assert_style  | Verify element CSS style      | target=element, value=JSON           |
-| back          | Navigate back                 | -                                    |
-| evaluate      | Run JavaScript                | value=JavaScript code                |
-| upload        | Upload file                   | value=file path(s)                   |
-| drag          | Drag and drop                 | target=start, value=end element      |
+| Action        | Description                   | target                    | value                              |
+|---------------|-------------------------------|---------------------------|------------------------------------|
+| navigate      | Go to URL                     | null                      | URL path                           |
+| click         | Click element                 | element description       | null                               |
+| type          | Type into field               | element description       | text to type                       |
+| fill_form     | Fill multiple fields          | null                      | JSON {field: value}                |
+| select        | Select dropdown option        | dropdown description      | option(s) to select                |
+| hover         | Hover over element            | element description       | null                               |
+| press_key     | Press keyboard key            | null                      | key name (Enter, Tab, etc)         |
+| wait          | Wait for element/text         | text/element to wait for  | OR time in ms (if target is null)  |
+| wait_for_page | Wait for page load            | null                      | load/domcontentloaded/networkidle  |
+| screenshot    | Take screenshot               | null                      | filename (optional)                |
+| assert_text   | Verify text visible           | null                      | expected text                      |
+| assert_element| Verify element visible        | element description       | null                               |
+| assert_style  | Verify element CSS style      | element description       | JSON {property, expected}          |
+| back          | Navigate back                 | null                      | null                               |
+| evaluate      | Run JavaScript                | null                      | JavaScript code                    |
+| upload        | Upload file                   | file input element        | file path(s)                       |
+| drag          | Drag and drop                 | source element            | destination element                |
 """
 
 
