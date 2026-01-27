@@ -360,3 +360,40 @@ def delete_page(session: Session, page_id: int) -> bool:
     session.delete(db_page)
     session.commit()
     return True
+
+
+# --- Stats ---
+
+def get_stats(session: Session) -> dict:
+    """Get global statistics for the dashboard."""
+    from datetime import timedelta
+    from sqlmodel import func
+
+    # Total counts
+    total_projects = session.exec(select(func.count(Project.id))).one()
+    total_test_cases = session.exec(select(func.count(TestCase.id))).one()
+
+    # Recent runs (last 7 days)
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+    recent_runs = session.exec(
+        select(func.count(TestRun.id)).where(TestRun.created_at >= seven_days_ago)
+    ).one()
+
+    # Pass rate (from completed runs only)
+    from db.models import RunStatus
+    completed_statuses = [RunStatus.PASSED, RunStatus.FAILED]
+    completed_runs = session.exec(
+        select(func.count(TestRun.id)).where(TestRun.status.in_(completed_statuses))
+    ).one()
+    passed_runs = session.exec(
+        select(func.count(TestRun.id)).where(TestRun.status == RunStatus.PASSED)
+    ).one()
+
+    pass_rate = round((passed_runs / completed_runs * 100), 1) if completed_runs > 0 else 0
+
+    return {
+        "total_projects": total_projects,
+        "total_test_cases": total_test_cases,
+        "recent_runs": recent_runs,
+        "pass_rate": pass_rate,
+    }

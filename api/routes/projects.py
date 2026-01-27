@@ -11,6 +11,12 @@ from db import crud
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
+@router.get("/stats")
+def get_stats(session: Session = Depends(get_session_dep)):
+    """Get global statistics for the dashboard."""
+    return crud.get_stats(session)
+
+
 @router.get("", response_model=List[ProjectRead])
 def list_projects(
     skip: int = 0,
