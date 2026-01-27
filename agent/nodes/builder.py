@@ -72,6 +72,21 @@ Project URL: {base_url}
 ## Current Test Case State (including any manual edits by user)
 {current_test_case}
 
+## CRITICAL: JSON Output Format Examples
+When outputting steps, use this exact JSON structure:
+
+Navigate example (target MUST be null):
+{{"action": "navigate", "target": null, "value": "/login", "description": "Go to login page"}}
+
+Click example (value MUST be null):
+{{"action": "click", "target": "Login button", "value": null, "description": "Click the login button"}}
+
+Type example:
+{{"action": "type", "target": "Email input", "value": "test@example.com", "description": "Enter email"}}
+
+WRONG - Never do this:
+{{"action": "navigate", "target": "/login", "value": null}}  <-- URL must be in value, not target!
+
 ## Available Actions (mapped to Playwright)
 - navigate: Go to URL (target = null, value = URL path like "/login")
 - click: Click element (target = element description like "Login button", value = null)
