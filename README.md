@@ -66,10 +66,6 @@ Frontend (3000) → Backend (8000) → playwright-http (8932) → Browser
 | POST | `/api/agent/projects/{id}/chat` | Chat with LangGraph agent |
 | POST | `/api/agent/projects/{id}/build` | Build test case with AI |
 
-## Documentation
-
-See [CLAUDE.md](./CLAUDE.md) for detailed documentation.
-
 ## License
 
 MIT
