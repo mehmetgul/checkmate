@@ -73,7 +73,8 @@ Project URL: {base_url}
 {current_test_case}
 
 ## Available Actions (mapped to Playwright)
-- navigate: Go to URL (target = null, value = URL path like "/login")
+- navigate: Go to URL. IMPORTANT: target must be null, put URL in value field.
+  Example: {{"action": "navigate", "target": null, "value": "/login", "description": "Go to login page"}}
 - click: Click element (target = element description like "Login button", value = null)
 - type: Type into single field (target = field description, value = text to type)
 - fill_form: Fill multiple fields at once (target = null, value = JSON like '{{"email": "test@example.com", "password": "pass123"}}')
@@ -226,5 +227,16 @@ async def build_test_case(
         "current_test_case": current_tc_formatted,
         "current_message": current_message,
     })
+
+    # Post-process: Fix navigate actions where URL is incorrectly in target
+    for step in result.test_case.steps:
+        if step.action == "navigate":
+            if step.target and not step.value:
+                # URL was put in target instead of value - fix it
+                step.value = step.target
+                step.target = None
+            elif step.target and step.value:
+                # Both set - target should be null for navigate
+                step.target = None
 
     return result
