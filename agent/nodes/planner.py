@@ -63,8 +63,7 @@ Feature to test: {feature}
 {personas_and_pages}
 
 Available actions (mapped to Playwright):
-- navigate: Go to URL. IMPORTANT: target must be null, put URL in value field.
-  Example: {{"action": "navigate", "target": null, "value": "/login", "description": "Go to login page"}}
+- navigate: Go to URL (target = null, value = URL path like "/login")
 - click: Click element (target = element description like "Login button", value = null)
 - type: Type into single field (target = field description, value = text to type)
 - fill_form: Fill multiple fields at once (target = null, value = JSON like '{{"email": "test@example.com", "password": "pass123"}}')
@@ -216,17 +215,6 @@ async def plan_test(state: AgentState) -> dict:
         "personas_and_pages": personas_and_pages,
         "query": last_message
     })
-
-    # Post-process: Fix navigate actions where URL is incorrectly in target
-    for step in result.steps:
-        if step.action == "navigate":
-            if step.target and not step.value:
-                # URL was put in target instead of value - fix it
-                step.value = step.target
-                step.target = None
-            elif step.target and step.value:
-                # Both set - target should be null for navigate
-                step.target = None
 
     # Convert to TestPlan format
     test_plan: TestPlan = {
