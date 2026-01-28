@@ -341,6 +341,11 @@ async def execute_steps_stream(
             if browser:
                 execution_options["browser"] = browser
 
+            # Debug: print what we're sending to executor (REMOVE AFTER DEBUGGING)
+            print(f"[executor] Resolved steps count: {len(resolved_steps)}")
+            for i, step in enumerate(resolved_steps):
+                print(f"[executor] Step {i+1}: action={step.get('action')}, target={step.get('target')}, value={step.get('value')}")
+
             async for event in executor_client.execute_stream(
                 base_url=project.base_url,
                 steps=resolved_steps,
