@@ -2,14 +2,17 @@
 
 import asyncio
 import json
+import logging
 from datetime import datetime
 from typing import List, Optional, AsyncGenerator
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session
+from httpx import HTTPError
 
-from db.session import get_session_dep, engine
+from db.session import get_session_dep
 from db.models import (
     TestRun, TestRunCreate, TestRunRead,
     TestRunStep, TestRunStepCreate, TestRunStepRead,
@@ -17,10 +20,15 @@ from db.models import (
 )
 from db import crud
 from agent.utils.resolver import resolve_references, mask_passwords_in_steps
-from agent.executor_client import (
-    PlaywrightExecutorClient,
-    test_executor_connection,
+from agent.executor_client import PlaywrightExecutorClient
+from api.utils.streaming import (
+    streaming_context,
+    sse_event,
+    sse_error,
+    sse_warning,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/test-runs", tags=["test-runs"])
 
@@ -267,172 +275,166 @@ async def execute_steps_stream(
         steps: Steps to execute
         browser: Optional browser ID (e.g., "chrome", "chromium-headless")
     """
-    # Create a new session for the streaming context
-    session = Session(engine)
-    executor_client: Optional[PlaywrightExecutorClient] = None
-    use_simulation = False
-
     try:
-        # Verify project exists
-        project = crud.get_project(session, project_id)
-        if not project:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Project not found'})}\n\n"
-            return
+        async with streaming_context() as (session, executor_client, use_simulation):
+            # Verify project exists
+            project = crud.get_project(session, project_id)
+            if not project:
+                yield sse_error("Project not found")
+                return
 
-        # Try to connect to playwright-http
-        executor_client = PlaywrightExecutorClient()
-        if not await test_executor_connection(executor_client):
-            use_simulation = True
-            yield f"data: {json.dumps({'type': 'warning', 'message': 'Playwright executor unavailable, using simulation mode'})}\n\n"
+            if use_simulation:
+                yield sse_warning("Playwright executor unavailable, using simulation mode")
 
-        # Resolve persona/page references in steps
-        steps_as_dicts = [step.model_dump() for step in steps]
-        resolved_steps = resolve_references(session, project_id, steps_as_dicts)
-        # Create masked version for display (database storage)
-        display_steps = mask_passwords_in_steps(resolved_steps)
+            # Resolve persona/page references in steps
+            steps_as_dicts = [step.model_dump() for step in steps]
+            resolved_steps = resolve_references(session, project_id, steps_as_dicts)
+            # Create masked version for display (database storage)
+            display_steps = mask_passwords_in_steps(resolved_steps)
 
-        # Create test run
-        test_run = crud.create_test_run(session, TestRunCreate(
-            project_id=project_id,
-            test_case_id=None,
-            trigger=RunTrigger.MANUAL,
-            status=RunStatus.RUNNING,
-        ))
-        crud.update_test_run(session, test_run.id, {"started_at": datetime.utcnow()})
+            # Create test run
+            test_run = crud.create_test_run(session, TestRunCreate(
+                project_id=project_id,
+                test_case_id=None,
+                trigger=RunTrigger.MANUAL,
+                status=RunStatus.RUNNING,
+            ))
+            crud.update_test_run(session, test_run.id, {"started_at": datetime.utcnow()})
 
-        # Send run started event
-        yield f"data: {json.dumps({'type': 'run_started', 'run_id': test_run.id})}\n\n"
+            # Send run started event
+            yield sse_event("run_started", run_id=test_run.id)
 
-        pass_count = 0
-        error_count = 0
+            pass_count = 0
+            error_count = 0
 
-        if use_simulation:
-            # Fallback: simulate execution
-            for i, step in enumerate(resolved_steps):
-                display_step = display_steps[i]  # Masked version for display
-                action = step.get("action", "unknown")
-                description = step.get("description", "")
+            if use_simulation:
+                # Fallback: simulate execution
+                for i, step in enumerate(resolved_steps):
+                    display_step = display_steps[i]  # Masked version for display
+                    action = step.get("action", "unknown")
+                    description = step.get("description", "")
 
-                yield f"data: {json.dumps({'type': 'step_started', 'step_number': i + 1, 'action': action, 'description': description})}\n\n"
+                    yield sse_event("step_started", step_number=i + 1, action=action, description=description)
 
-                await asyncio.sleep(0.3 + (i * 0.1))
-                step_status = StepStatus.PASSED
-                step_error = None
-                step_duration = 100 + (i * 50)
+                    await asyncio.sleep(0.3 + (i * 0.1))
+                    step_status = StepStatus.PASSED
+                    step_error = None
+                    step_duration = 100 + (i * 50)
 
-                crud.create_test_run_step(session, TestRunStepCreate(
-                    test_run_id=test_run.id,
-                    test_case_id=None,
-                    step_number=i + 1,
-                    action=action,
-                    target=display_step.get("target"),  # Masked
-                    value=display_step.get("value"),  # Masked value stored in DB
-                    status=step_status,
-                    duration=step_duration,
-                    error=step_error,
-                ))
-
-                pass_count += 1
-
-                yield f"data: {json.dumps({'type': 'step_completed', 'step_number': i + 1, 'action': action, 'description': description, 'status': step_status.value, 'duration': step_duration, 'error': step_error})}\n\n"
-        else:
-            # Execute via playwright-http
-            execution_options = {"screenshot_on_failure": True}
-            if browser:
-                execution_options["browser"] = browser
-
-            async for event in executor_client.execute_stream(
-                base_url=project.base_url,
-                steps=resolved_steps,
-                options=execution_options,
-            ):
-                event_type = event.get("type")
-
-                if event_type == "error":
-                    yield f"data: {json.dumps({'type': 'error', 'message': event.get('error')})}\n\n"
-                    break
-
-                elif event_type == "step_started":
-                    step_number = event.get("step_number", 0)
-                    # Use masked values from display_steps for frontend
-                    step_idx = step_number - 1
-                    display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
-                    masked_event = {
-                        **event,
-                        "target": display_step.get("target"),
-                        "value": display_step.get("value"),
-                    }
-                    yield f"data: {json.dumps(masked_event)}\n\n"
-
-                elif event_type == "step_completed":
-                    step_number = event.get("step_number", 0)
-                    status = event.get("status", "failed")
-                    step_status = StepStatus.PASSED if status == "passed" else StepStatus.FAILED
-
-                    # Get step data for this step (use display_steps for masked values)
-                    step_idx = step_number - 1
-                    display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
-
-                    # Create step record in DB with masked values
                     crud.create_test_run_step(session, TestRunStepCreate(
                         test_run_id=test_run.id,
                         test_case_id=None,
-                        step_number=step_number,
-                        action=display_step.get("action", "unknown"),
-                        target=display_step.get("target"),
-                        value=display_step.get("value"),  # Masked value
+                        step_number=i + 1,
+                        action=action,
+                        target=display_step.get("target"),  # Masked
+                        value=display_step.get("value"),  # Masked value stored in DB
                         status=step_status,
-                        duration=event.get("duration", 0),
-                        error=event.get("error"),
-                        screenshot=event.get("screenshot"),
+                        duration=step_duration,
+                        error=step_error,
                     ))
 
-                    if step_status == StepStatus.PASSED:
-                        pass_count += 1
-                    else:
-                        error_count += 1
+                    pass_count += 1
 
-                    # Use masked values for frontend
-                    masked_event = {
-                        **event,
-                        "target": display_step.get("target"),
-                        "value": display_step.get("value"),
-                    }
-                    yield f"data: {json.dumps(masked_event)}\n\n"
+                    yield sse_event("step_completed", step_number=i + 1, action=action, description=description, status=step_status.value, duration=step_duration, error=step_error)
+            else:
+                # Execute via playwright-http
+                execution_options = {"screenshot_on_failure": True}
+                if browser:
+                    execution_options["browser"] = browser
 
-                elif event_type == "completed":
-                    pass
+                async for event in executor_client.execute_stream(
+                    base_url=project.base_url,
+                    steps=resolved_steps,
+                    options=execution_options,
+                ):
+                    event_type = event.get("type")
 
-        # Update test run with final results
-        final_status = RunStatus.PASSED if error_count == 0 else RunStatus.FAILED
-        executed_count = pass_count + error_count
-        skipped_count = len(resolved_steps) - executed_count
-        if skipped_count > 0:
-            summary = f"Executed {executed_count} of {len(resolved_steps)} steps: {pass_count} passed, {error_count} failed, {skipped_count} skipped"
-        else:
-            summary = f"Executed {len(resolved_steps)} steps: {pass_count} passed, {error_count} failed"
+                    if event_type == "error":
+                        yield sse_error(event.get("error", "Unknown executor error"))
+                        break
 
-        crud.update_test_run(session, test_run.id, {
-            "status": final_status,
-            "completed_at": datetime.utcnow(),
-            "pass_count": pass_count,
-            "error_count": error_count,
-            "summary": summary,
-        })
+                    elif event_type == "step_started":
+                        step_number = event.get("step_number", 0)
+                        # Use masked values from display_steps for frontend
+                        step_idx = step_number - 1
+                        display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
+                        masked_event = {
+                            **event,
+                            "target": display_step.get("target"),
+                            "value": display_step.get("value"),
+                        }
+                        yield f"data: {json.dumps(masked_event)}\n\n"
 
-        # Send run completed event
-        yield f"data: {json.dumps({'type': 'run_completed', 'run_id': test_run.id, 'status': final_status.value, 'pass_count': pass_count, 'error_count': error_count, 'summary': summary})}\n\n"
+                    elif event_type == "step_completed":
+                        step_number = event.get("step_number", 0)
+                        status = event.get("status", "failed")
+                        step_status = StepStatus.PASSED if status == "passed" else StepStatus.FAILED
 
-        # Commit the transaction
-        session.commit()
+                        # Get step data for this step (use display_steps for masked values)
+                        step_idx = step_number - 1
+                        display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
 
+                        # Create step record in DB with masked values
+                        crud.create_test_run_step(session, TestRunStepCreate(
+                            test_run_id=test_run.id,
+                            test_case_id=None,
+                            step_number=step_number,
+                            action=display_step.get("action", "unknown"),
+                            target=display_step.get("target"),
+                            value=display_step.get("value"),  # Masked value
+                            status=step_status,
+                            duration=event.get("duration", 0),
+                            error=event.get("error"),
+                            screenshot=event.get("screenshot"),
+                        ))
+
+                        if step_status == StepStatus.PASSED:
+                            pass_count += 1
+                        else:
+                            error_count += 1
+
+                        # Use masked values for frontend
+                        masked_event = {
+                            **event,
+                            "target": display_step.get("target"),
+                            "value": display_step.get("value"),
+                        }
+                        yield f"data: {json.dumps(masked_event)}\n\n"
+
+                    elif event_type == "completed":
+                        pass
+
+            # Update test run with final results
+            final_status = RunStatus.PASSED if error_count == 0 else RunStatus.FAILED
+            executed_count = pass_count + error_count
+            skipped_count = len(resolved_steps) - executed_count
+            if skipped_count > 0:
+                summary = f"Executed {executed_count} of {len(resolved_steps)} steps: {pass_count} passed, {error_count} failed, {skipped_count} skipped"
+            else:
+                summary = f"Executed {len(resolved_steps)} steps: {pass_count} passed, {error_count} failed"
+
+            crud.update_test_run(session, test_run.id, {
+                "status": final_status,
+                "completed_at": datetime.utcnow(),
+                "pass_count": pass_count,
+                "error_count": error_count,
+                "summary": summary,
+            })
+
+            # Send run completed event
+            yield sse_event("run_completed", run_id=test_run.id, status=final_status.value, pass_count=pass_count, error_count=error_count, summary=summary)
+
+    except SQLAlchemyError as e:
+        logger.error(f"Database error in execute_steps_stream: {e}")
+        yield sse_error(f"Database error: {e}")
+    except HTTPError as e:
+        logger.error(f"Executor connection error: {e}")
+        yield sse_error(f"Browser connection error: {e}")
+    except json.JSONDecodeError as e:
+        yield sse_error(f"Invalid step data: {e}")
     except Exception as e:
-        session.rollback()
-        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-    finally:
-        if executor_client:
-            await executor_client.close()
-        session.close()
+        logger.exception("Unexpected error in execute_steps_stream")
+        yield sse_error(str(e))
 
 
 @router.post("/execute/stream")
