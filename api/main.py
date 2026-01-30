@@ -71,7 +71,7 @@ def health_check():
 async def log_requests(request: Request, call_next):
     """Log all HTTP requests with request ID for correlation."""
     # Generate and set request ID for entire request flow
-    request_id = str(uuid.uuid4())[:8]
+    request_id = str(uuid.uuid4())
     request_id_var.set(request_id)
 
     start = time.perf_counter()
