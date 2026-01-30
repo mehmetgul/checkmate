@@ -4,13 +4,14 @@ Communicates with the playwright-http service via HTTP/SSE.
 """
 
 import json
-import logging
 import os
 from typing import AsyncGenerator, Optional
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from core.logging import get_logger, request_id_var
+
+logger = get_logger(__name__)
 
 PLAYWRIGHT_EXECUTOR_URL = os.getenv("PLAYWRIGHT_EXECUTOR_URL", "http://localhost:8932")
 
@@ -22,6 +23,10 @@ class PlaywrightExecutorClient:
         self.base_url = PLAYWRIGHT_EXECUTOR_URL.rstrip("/")
         self.client = httpx.AsyncClient(timeout=300.0)
 
+    def _get_headers(self) -> dict:
+        """Get headers with request ID for distributed tracing."""
+        return {"X-Request-ID": request_id_var.get()}
+
     async def health_check(self) -> bool:
         """Check if playwright-http is available.
 
@@ -29,7 +34,10 @@ class PlaywrightExecutorClient:
             True if service is healthy, False otherwise
         """
         try:
-            response = await self.client.get(f"{self.base_url}/health")
+            response = await self.client.get(
+                f"{self.base_url}/health",
+                headers=self._get_headers(),
+            )
             if response.status_code == 200:
                 data = response.json()
                 return data.get("status") == "ok"
@@ -46,7 +54,10 @@ class PlaywrightExecutorClient:
             Returns empty list if service unavailable.
         """
         try:
-            response = await self.client.get(f"{self.base_url}/browsers")
+            response = await self.client.get(
+                f"{self.base_url}/browsers",
+                headers=self._get_headers(),
+            )
             if response.status_code == 200:
                 return response.json()
             return {"browsers": [], "default": None}
@@ -84,6 +95,7 @@ class PlaywrightExecutorClient:
                 "POST",
                 f"{self.base_url}/execute",
                 json=request_body,
+                headers=self._get_headers(),
                 timeout=300.0,
             ) as response:
                 if response.status_code != 200:

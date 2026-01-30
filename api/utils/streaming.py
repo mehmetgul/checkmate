@@ -1,7 +1,6 @@
 """Streaming utilities for SSE test execution."""
 
 import json
-import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Tuple
 
@@ -11,8 +10,9 @@ from httpx import HTTPError
 
 from db.session import engine
 from agent.executor_client import PlaywrightExecutorClient, test_executor_connection
+from core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # =============================================================================
