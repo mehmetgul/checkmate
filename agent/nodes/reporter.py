@@ -5,6 +5,9 @@ from agent.llm import get_llm
 from langchain_core.messages import AIMessage
 
 from agent.state import AgentState
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 REPORTER_PROMPT = ChatPromptTemplate.from_messages([
@@ -27,6 +30,8 @@ Be conversational and helpful."""),
 
 async def generate_report(state: AgentState) -> dict:
     """Generate a summary report of test execution."""
+    logger.info("Generating test report")
+
     model = get_llm("fast")
 
     test_plan = state.get("test_plan", {})
@@ -60,6 +65,8 @@ async def generate_report(state: AgentState) -> dict:
         },
         "results": formatted_results,
     })
+
+    logger.info(f"Report generated: {overall_status.upper()}, {len(test_results)} steps executed")
 
     return {
         "messages": [AIMessage(content=response.content)],

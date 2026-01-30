@@ -6,6 +6,9 @@ from typing import Optional
 from langchain_core.messages import AIMessage
 
 from agent.state import AgentState, TestResult
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 async def execute_step(state: AgentState) -> dict:
@@ -21,6 +24,9 @@ async def execute_step(state: AgentState) -> dict:
         return {"current_step": current_step}
 
     step = test_plan["steps"][current_step]
+    total_steps = len(test_plan.get("steps", []))
+    logger.info(f"Executing step {current_step + 1}/{total_steps}: {step['action']} - {step.get('description', '')[:50]}")
+
     start_time = asyncio.get_event_loop().time()
 
     # Placeholder result - will be replaced with actual MCP execution
@@ -60,6 +66,7 @@ async def execute_step(state: AgentState) -> dict:
         result["status"] = "failed"
         result["error"] = str(e)
         result["duration_ms"] = int((asyncio.get_event_loop().time() - start_time) * 1000)
+        logger.error(f"Step {current_step + 1} failed: {e}")
 
     # Update state
     existing_results = state.get("test_results", [])

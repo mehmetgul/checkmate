@@ -7,6 +7,9 @@ from typing import Callable, Literal, Optional
 import httpx
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 LLMTier = Literal["default", "fast"]
 
@@ -142,9 +145,18 @@ def get_llm(tier: LLMTier = "default") -> ChatOpenAI | AzureChatOpenAI:
     provider = os.getenv("LLM_PROVIDER", "openai").lower()
 
     if provider == "azure":
-        return _get_azure_model(tier)
+        llm = _get_azure_model(tier)
+        deployment = os.getenv(f"AZURE_OPENAI_DEPLOYMENT_{'DEFAULT' if tier == 'default' else 'FAST'}")
+        logger.debug(f"LLM: provider=azure, tier={tier}, deployment={deployment}")
+        return llm
     elif provider == "openai":
-        return _get_openai_model(tier)
+        llm = _get_openai_model(tier)
+        model_name = os.getenv(
+            f"LLM_MODEL_{'DEFAULT' if tier == 'default' else 'FAST'}",
+            DEFAULT_MODELS[tier]
+        )
+        logger.debug(f"LLM: provider=openai, tier={tier}, model={model_name}")
+        return llm
     else:
         raise ValueError(
             f"Unknown LLM provider: {provider}. Supported: openai, azure"

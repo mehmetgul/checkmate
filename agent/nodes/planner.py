@@ -9,6 +9,9 @@ from agent.state import AgentState, TestPlan, TestStep
 from sqlmodel import Session
 from db.session import engine
 from db import crud
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 ActionType = Literal[
@@ -206,6 +209,8 @@ async def plan_test(state: AgentState) -> dict:
     last_message = messages[-1].content if messages else ""
     previous_plan = state.get("test_plan")
 
+    logger.info(f"Planning test: {last_message[:100]}{'...' if len(last_message) > 100 else ''}")
+
     # Get project info from project_settings or legacy fields
     settings = state.get("project_settings") or {}
     project_id = settings.get("id") or state.get("project_id")
@@ -246,6 +251,8 @@ async def plan_test(state: AgentState) -> dict:
         ],
         "expected_outcome": result.expected_outcome,
     }
+
+    logger.info(f"Generated test plan with {len(result.steps)} steps")
 
     # Get available personas and pages to filter valid template variables
     valid_templates = set()

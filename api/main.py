@@ -1,23 +1,33 @@
 """FastAPI application for the QA Testing Agent API."""
 
+import time
+import uuid
 from contextlib import asynccontextmanager
+
 from dotenv import load_dotenv
 
 # Load .env file before any other imports that read env vars
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from core.logging import setup_logging, get_logger, request_id_var
 from db.session import create_db_and_tables
 from api.routes import projects, test_cases, test_runs, agent, settings
+
+# Initialize logging on module load
+setup_logging()
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - create tables on startup."""
+    logger.info("Starting QA Testing Agent API")
     create_db_and_tables()
     yield
+    logger.info("Shutting down QA Testing Agent API")
 
 
 app = FastAPI(
@@ -55,3 +65,24 @@ def read_root():
 def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all HTTP requests with request ID for correlation."""
+    # Generate and set request ID for entire request flow
+    request_id = str(uuid.uuid4())[:8]
+    request_id_var.set(request_id)
+
+    start = time.perf_counter()
+    logger.info(f"{request.method} {request.url.path}")
+
+    response = await call_next(request)
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    logger.info(f"{response.status_code} ({duration_ms:.1f}ms)")
+
+    # Return request ID in response header for client debugging
+    response.headers["X-Request-ID"] = request_id
+
+    return response

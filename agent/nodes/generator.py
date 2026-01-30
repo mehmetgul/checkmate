@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 
 from agent.state import AgentState
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class GeneratedTestCase(BaseModel):
@@ -55,6 +58,8 @@ async def generate_test_cases(state: AgentState) -> dict:
     messages = state.get("messages", [])
     last_message = messages[-1].content if messages else ""
 
+    logger.info(f"Generating test cases for: {last_message[:100]}{'...' if len(last_message) > 100 else ''}")
+
     # Get project info from project_settings or legacy fields
     settings = state.get("project_settings") or {}
     project_name = settings.get("name") or state.get("project_name", "Unknown")
@@ -80,6 +85,8 @@ async def generate_test_cases(state: AgentState) -> dict:
         )
 
     response_parts.append(f"\n\n{result.summary}")
+
+    logger.info(f"Generated {len(result.test_cases)} test cases")
 
     return {
         "messages": [AIMessage(content="\n".join(response_parts))],

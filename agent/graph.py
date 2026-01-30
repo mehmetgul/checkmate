@@ -9,6 +9,9 @@ from agent.nodes.planner import plan_test
 from agent.nodes.executor import execute_step
 from agent.nodes.reporter import generate_report
 from agent.nodes.generator import generate_test_cases
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def route_intent(state: AgentState) -> str:
@@ -77,4 +80,6 @@ builder.add_edge("reporter", END)
 
 # Compile with checkpointer for persistence
 checkpointer = MemorySaver()
+logger.info("Compiling LangGraph workflow")
 graph = builder.compile(checkpointer=checkpointer)
+logger.info("LangGraph workflow compiled successfully")

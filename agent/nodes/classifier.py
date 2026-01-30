@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
 from agent.state import AgentState
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class IntentClassification(BaseModel):
@@ -64,6 +67,8 @@ async def classify_intent(state: AgentState) -> dict:
         "project_url": project_url,
         "message": last_message
     })
+
+    logger.info(f"Classified intent: {result.intent} (confidence={result.confidence:.2f}, feature={result.extracted_feature})")
 
     return {
         "intent": result.intent,

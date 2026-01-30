@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import logging
 from datetime import datetime
 from typing import List, Optional, AsyncGenerator
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,8 +26,9 @@ from api.utils.streaming import (
     sse_error,
     sse_warning,
 )
+from core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/test-cases", tags=["test-cases"])
 
@@ -244,11 +244,13 @@ async def run_test_case_stream(test_case_id: int, browser: Optional[str] = None)
         test_case_id: ID of test case to run
         browser: Optional browser ID (e.g., "chrome", "chromium-headless")
     """
+    logger.info(f"Starting test case execution: test_case_id={test_case_id}, browser={browser or 'default'}")
     try:
         async with streaming_context() as (session, executor_client, use_simulation):
             # Get test case
             test_case = crud.get_test_case(session, test_case_id)
             if not test_case:
+                logger.warning(f"Test case not found: {test_case_id}")
                 yield sse_error("Test case not found")
                 return
 
@@ -269,6 +271,7 @@ async def run_test_case_stream(test_case_id: int, browser: Optional[str] = None)
                 return
 
             if use_simulation:
+                logger.info("Playwright executor unavailable, using simulation mode")
                 yield sse_warning("Playwright executor unavailable, using simulation mode")
 
             # Resolve persona/page references in steps
@@ -285,6 +288,8 @@ async def run_test_case_stream(test_case_id: int, browser: Optional[str] = None)
             ))
             crud.update_test_run(session, test_run.id, {"started_at": datetime.utcnow()})
 
+            logger.info(f"Created test run: run_id={test_run.id}, steps={len(resolved_steps)}")
+
             # Send run started event
             yield sse_event("run_started", run_id=test_run.id, test_case_id=test_case_id, total_steps=len(resolved_steps))
 
@@ -300,6 +305,7 @@ async def run_test_case_stream(test_case_id: int, browser: Optional[str] = None)
                     value = display_step.get("value")  # Masked
                     description = step_data.get("description", f"Step {i + 1}")
 
+                    logger.info(f"Executing step {i + 1}/{len(resolved_steps)}: {action} - {description[:50]}")
                     yield sse_event("step_started", step_number=i + 1, action=action, description=description)
 
                     await asyncio.sleep(0.3 + (i * 0.1))
@@ -324,6 +330,7 @@ async def run_test_case_stream(test_case_id: int, browser: Optional[str] = None)
                     yield sse_event("step_completed", step_number=i + 1, action=action, description=description, status=step_status.value, duration=step_duration, error=step_error)
             else:
                 # Execute via playwright-http
+                logger.info(f"Executing via playwright-http: base_url={project.base_url}")
                 execution_options = {"screenshot_on_failure": True}
                 if browser:
                     execution_options["browser"] = browser
@@ -337,11 +344,13 @@ async def run_test_case_stream(test_case_id: int, browser: Optional[str] = None)
                     event_type = event.get("type")
 
                     if event_type == "error":
+                        logger.error(f"Executor error: {event.get('error')}")
                         yield sse_error(event.get("error", "Unknown executor error"))
                         break
 
                     elif event_type == "step_started":
                         step_number = event.get("step_number", 0)
+                        logger.info(f"Executing step {step_number}/{len(resolved_steps)}: {event.get('action', 'unknown')}")
                         # Use masked values from display_steps for frontend
                         step_idx = step_number - 1
                         display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
@@ -356,6 +365,12 @@ async def run_test_case_stream(test_case_id: int, browser: Optional[str] = None)
                         step_number = event.get("step_number", 0)
                         status = event.get("status", "failed")
                         step_status = StepStatus.PASSED if status == "passed" else StepStatus.FAILED
+                        duration = event.get("duration", 0)
+
+                        if step_status == StepStatus.PASSED:
+                            logger.info(f"Step {step_number} passed ({duration}ms)")
+                        else:
+                            logger.warning(f"Step {step_number} failed: {event.get('error', 'unknown error')}")
 
                         # Get step data for this step (use display_steps for masked values)
                         step_idx = step_number - 1
@@ -370,7 +385,7 @@ async def run_test_case_stream(test_case_id: int, browser: Optional[str] = None)
                             target=display_step.get("target"),
                             value=display_step.get("value"),  # Masked value
                             status=step_status,
-                            duration=event.get("duration", 0),
+                            duration=duration,
                             error=event.get("error"),
                             screenshot=event.get("screenshot"),
                         ))
@@ -408,6 +423,8 @@ async def run_test_case_stream(test_case_id: int, browser: Optional[str] = None)
                 "error_count": error_count,
                 "summary": summary,
             })
+
+            logger.info(f"Test run completed: run_id={test_run.id}, status={final_status.value}, passed={pass_count}, failed={error_count}")
 
             # Send run completed event
             yield sse_event("run_completed", run_id=test_run.id, status=final_status.value, pass_count=pass_count, error_count=error_count, summary=summary)
@@ -466,6 +483,7 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
     """
     import uuid
 
+    logger.info(f"Starting batch execution: project_id={project_id}, test_cases={len(test_case_ids)}, browser={browser or 'default'}")
     try:
         async with streaming_context() as (session, executor_client, use_simulation):
             # Verify project exists
@@ -486,10 +504,12 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
                 return
 
             if use_simulation:
+                logger.info("Batch: Playwright executor unavailable, using simulation mode")
                 yield sse_warning("Playwright executor unavailable, using simulation mode")
 
             # Generate batch ID to group these runs
             batch_id = f"batch-{uuid.uuid4().hex[:8]}"
+            logger.info(f"Batch started: batch_id={batch_id}, test_cases={len(valid_test_cases)}")
 
             # Send batch started event
             yield sse_event("batch_started", batch_id=batch_id, total_tests=len(valid_test_cases), test_case_ids=[tc.id for tc in valid_test_cases])
@@ -657,10 +677,13 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
                 else:
                     batch_failed += 1
 
+                logger.info(f"Test case {test_case.id} completed: status={final_status.value}, passed={pass_count}, failed={error_count}")
+
                 # Send test completed event
                 yield sse_event("test_completed", test_case_id=test_case.id, run_id=test_run.id, status=final_status.value, pass_count=pass_count, error_count=error_count)
 
             # Send batch completed event
+            logger.info(f"Batch completed: batch_id={batch_id}, passed={batch_passed}, failed={batch_failed}")
             yield sse_event("batch_completed", passed=batch_passed, failed=batch_failed, total=len(valid_test_cases), run_ids=run_ids)
 
     except SQLAlchemyError as e:

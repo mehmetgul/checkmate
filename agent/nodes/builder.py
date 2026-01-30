@@ -8,6 +8,9 @@ from sqlmodel import Session
 
 from db.session import engine
 from db import crud
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 ActionType = Literal[
@@ -183,6 +186,8 @@ async def build_test_case(
     project_id: Optional[int] = None,
 ) -> BuilderResponse:
     """Build or modify a test case based on user messages."""
+    logger.info(f"Building test case: {current_message[:100]}{'...' if len(current_message) > 100 else ''}")
+
     model = get_llm("default")
     structured_model = model.with_structured_output(BuilderResponse)
 
@@ -241,5 +246,8 @@ async def build_test_case(
         "current_test_case": current_tc_formatted,
         "current_message": current_message,
     })
+
+    step_count = len(result.test_case.steps) if result.test_case else 0
+    logger.info(f"Built test case '{result.test_case.name}' with {step_count} steps")
 
     return result
