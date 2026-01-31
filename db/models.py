@@ -162,6 +162,13 @@ class TestRun(TestRunBase, table=True):
     pass_count: int = 0
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # Retry tracking
+    retry_attempt: int = 0  # Current retry attempt (0 = original run)
+    max_retries: int = 0  # Maximum retries configured for this run
+    original_run_id: Optional[int] = Field(default=None, foreign_key="testrun.id", index=True)
+    retry_mode: Optional[str] = None  # "intelligent" or "simple"
+    retry_reason: Optional[str] = None  # Reason for retry (from classifier)
+
     project: Project = Relationship(back_populates="test_runs")
     test_case: Optional["TestCase"] = Relationship(back_populates="test_runs")
     steps: List["TestRunStep"] = Relationship(back_populates="test_run", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
@@ -182,6 +189,12 @@ class TestRunRead(TestRunBase):
     error_count: int
     pass_count: int
     created_at: datetime
+    # Retry tracking
+    retry_attempt: int = 0
+    max_retries: int = 0
+    original_run_id: Optional[int] = None
+    retry_mode: Optional[str] = None
+    retry_reason: Optional[str] = None
 
 
 # --- TestRunStep ---
