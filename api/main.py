@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.logging import setup_logging, get_logger, request_id_var
 from db.session import create_db_and_tables
-from api.routes import projects, test_cases, test_runs, agent, settings, config
+from api.routes import projects, test_cases, test_runs, agent, settings, config, notifications, schedules
 
 # Initialize logging on module load
 setup_logging()
@@ -24,9 +24,18 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - create tables on startup."""
+    from scheduler import scheduler_service
+
     logger.info("Starting QA Testing Agent API")
     create_db_and_tables()
+
+    # Start the scheduler service
+    await scheduler_service.start()
+
     yield
+
+    # Stop the scheduler service
+    await scheduler_service.stop()
     logger.info("Shutting down QA Testing Agent API")
 
 
@@ -54,6 +63,9 @@ app.include_router(test_runs.router, prefix="/api")
 app.include_router(agent.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 app.include_router(config.router, prefix="/api")
+app.include_router(notifications.router, prefix="/api")
+app.include_router(schedules.router, prefix="/api")
+app.include_router(schedules.project_runs_router, prefix="/api")
 
 
 @app.get("/")

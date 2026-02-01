@@ -1,6 +1,6 @@
 """CRUD operations for database models."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 from sqlmodel import Session, select
 
@@ -11,6 +11,9 @@ from db.models import (
     TestRunStep, TestRunStepCreate,
     Persona, PersonaCreate, PersonaUpdate,
     Page, PageCreate, PageUpdate,
+    NotificationChannel, NotificationChannelCreate, NotificationChannelUpdate,
+    Schedule, ScheduleCreate, ScheduleUpdate,
+    ScheduledRun, ScheduledRunCreate,
 )
 from db.encryption import encrypt_password
 
@@ -210,6 +213,21 @@ def get_test_runs_by_test_case(
     return session.exec(statement).all()
 
 
+def get_test_runs_by_thread_id(
+    session: Session,
+    project_id: int,
+    thread_id: str
+) -> List[TestRun]:
+    """Get all test runs for a specific thread_id (batch/scheduled run)."""
+    statement = (
+        select(TestRun)
+        .where(TestRun.project_id == project_id)
+        .where(TestRun.thread_id == thread_id)
+        .order_by(TestRun.created_at.asc())
+    )
+    return session.exec(statement).all()
+
+
 def update_test_run(session: Session, test_run_id: int, data: dict) -> Optional[TestRun]:
     """Update a test run."""
     db_test_run = session.get(TestRun, test_run_id)
@@ -397,3 +415,255 @@ def get_stats(session: Session) -> dict:
         "recent_runs": recent_runs,
         "pass_rate": pass_rate,
     }
+
+
+# --- NotificationChannel CRUD ---
+
+def create_notification_channel(session: Session, channel: NotificationChannelCreate) -> NotificationChannel:
+    """Create a new notification channel."""
+    db_channel = NotificationChannel.model_validate(channel)
+    session.add(db_channel)
+    session.commit()
+    session.refresh(db_channel)
+    return db_channel
+
+
+def get_notification_channel(session: Session, channel_id: int) -> Optional[NotificationChannel]:
+    """Get a notification channel by ID."""
+    return session.get(NotificationChannel, channel_id)
+
+
+def get_notification_channels_by_project(session: Session, project_id: int) -> List[NotificationChannel]:
+    """Get all notification channels for a project."""
+    statement = select(NotificationChannel).where(NotificationChannel.project_id == project_id)
+    return session.exec(statement).all()
+
+
+def get_notification_channels_by_ids(session: Session, channel_ids: List[int]) -> List[NotificationChannel]:
+    """Get notification channels by their IDs."""
+    if not channel_ids:
+        return []
+    statement = select(NotificationChannel).where(NotificationChannel.id.in_(channel_ids))
+    return session.exec(statement).all()
+
+
+def update_notification_channel(session: Session, channel_id: int, data: NotificationChannelUpdate) -> Optional[NotificationChannel]:
+    """Update a notification channel."""
+    db_channel = session.get(NotificationChannel, channel_id)
+    if not db_channel:
+        return None
+
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        if hasattr(db_channel, key):
+            setattr(db_channel, key, value)
+
+    db_channel.updated_at = datetime.utcnow()
+    session.add(db_channel)
+    session.commit()
+    session.refresh(db_channel)
+    return db_channel
+
+
+def delete_notification_channel(session: Session, channel_id: int) -> bool:
+    """Delete a notification channel."""
+    db_channel = session.get(NotificationChannel, channel_id)
+    if not db_channel:
+        return False
+
+    session.delete(db_channel)
+    session.commit()
+    return True
+
+
+# --- Schedule CRUD ---
+
+def create_schedule(session: Session, schedule: ScheduleCreate) -> Schedule:
+    """Create a new schedule."""
+    db_schedule = Schedule.model_validate(schedule)
+    session.add(db_schedule)
+    session.commit()
+    session.refresh(db_schedule)
+    return db_schedule
+
+
+def get_schedule(session: Session, schedule_id: int) -> Optional[Schedule]:
+    """Get a schedule by ID."""
+    return session.get(Schedule, schedule_id)
+
+
+def get_schedules_by_project(session: Session, project_id: int) -> List[Schedule]:
+    """Get all schedules for a project."""
+    statement = select(Schedule).where(Schedule.project_id == project_id)
+    return session.exec(statement).all()
+
+
+def get_all_enabled_schedules(session: Session) -> List[Schedule]:
+    """Get all enabled schedules across all projects."""
+    statement = select(Schedule).where(Schedule.enabled == True)
+    return session.exec(statement).all()
+
+
+def update_schedule(session: Session, schedule_id: int, data: ScheduleUpdate) -> Optional[Schedule]:
+    """Update a schedule."""
+    db_schedule = session.get(Schedule, schedule_id)
+    if not db_schedule:
+        return None
+
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        if hasattr(db_schedule, key):
+            setattr(db_schedule, key, value)
+
+    db_schedule.updated_at = datetime.utcnow()
+    session.add(db_schedule)
+    session.commit()
+    session.refresh(db_schedule)
+    return db_schedule
+
+
+def update_schedule_run_times(session: Session, schedule_id: int, last_run_at: Optional[datetime], next_run_at: Optional[datetime]) -> Optional[Schedule]:
+    """Update schedule run times."""
+    db_schedule = session.get(Schedule, schedule_id)
+    if not db_schedule:
+        return None
+
+    if last_run_at is not None:
+        db_schedule.last_run_at = last_run_at
+    if next_run_at is not None:
+        db_schedule.next_run_at = next_run_at
+
+    db_schedule.updated_at = datetime.utcnow()
+    session.add(db_schedule)
+    session.commit()
+    session.refresh(db_schedule)
+    return db_schedule
+
+
+def try_claim_schedule_execution(session: Session, schedule_id: int, claim_window_seconds: int = 60) -> bool:
+    """
+    Atomically try to claim a schedule for execution (distributed lock).
+
+    Uses optimistic locking: updates last_run_at only if it hasn't been
+    updated within the claim window. This prevents multiple pods from
+    executing the same schedule simultaneously.
+
+    Args:
+        session: Database session
+        schedule_id: Schedule to claim
+        claim_window_seconds: Minimum seconds between executions (default 60)
+
+    Returns:
+        True if this instance claimed the execution, False if another instance did
+    """
+    from sqlalchemy import text
+
+    now = datetime.utcnow()
+    threshold = now - timedelta(seconds=claim_window_seconds)
+
+    # Atomic UPDATE with condition - only succeeds if not recently claimed
+    # This works for both SQLite and PostgreSQL
+    result = session.execute(
+        text("""
+            UPDATE schedule
+            SET last_run_at = :now, updated_at = :now
+            WHERE id = :schedule_id
+              AND enabled = 1
+              AND (last_run_at IS NULL OR last_run_at < :threshold)
+        """),
+        {"schedule_id": schedule_id, "now": now, "threshold": threshold}
+    )
+    session.commit()
+
+    # If rowcount is 1, we successfully claimed it
+    return result.rowcount == 1
+
+
+def delete_schedule(session: Session, schedule_id: int) -> bool:
+    """Delete a schedule and all related scheduled runs."""
+    db_schedule = session.get(Schedule, schedule_id)
+    if not db_schedule:
+        return False
+
+    session.delete(db_schedule)
+    session.commit()
+    return True
+
+
+# --- ScheduledRun CRUD ---
+
+def create_scheduled_run(session: Session, run: ScheduledRunCreate) -> ScheduledRun:
+    """Create a new scheduled run."""
+    db_run = ScheduledRun.model_validate(run)
+    session.add(db_run)
+    session.commit()
+    session.refresh(db_run)
+    return db_run
+
+
+def get_scheduled_run(session: Session, run_id: int) -> Optional[ScheduledRun]:
+    """Get a scheduled run by ID."""
+    return session.get(ScheduledRun, run_id)
+
+
+def get_scheduled_runs_by_schedule(session: Session, schedule_id: int, skip: int = 0, limit: int = 50) -> List[ScheduledRun]:
+    """Get all scheduled runs for a schedule."""
+    statement = (
+        select(ScheduledRun)
+        .where(ScheduledRun.schedule_id == schedule_id)
+        .order_by(ScheduledRun.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    return session.exec(statement).all()
+
+
+def get_scheduled_runs_by_project(session: Session, project_id: int, skip: int = 0, limit: int = 50) -> List[ScheduledRun]:
+    """Get all scheduled runs for a project."""
+    statement = (
+        select(ScheduledRun)
+        .where(ScheduledRun.project_id == project_id)
+        .order_by(ScheduledRun.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    return session.exec(statement).all()
+
+
+def update_scheduled_run(session: Session, run_id: int, data: dict) -> Optional[ScheduledRun]:
+    """Update a scheduled run."""
+    db_run = session.get(ScheduledRun, run_id)
+    if not db_run:
+        return None
+
+    for key, value in data.items():
+        if hasattr(db_run, key):
+            setattr(db_run, key, value)
+
+    session.add(db_run)
+    session.commit()
+    session.refresh(db_run)
+    return db_run
+
+
+def get_test_cases_by_tags(session: Session, project_id: int, tags: List[str]) -> List[TestCase]:
+    """Get test cases that have any of the specified tags."""
+    from db.models import TestCaseStatus
+    import json
+
+    # Get all active test cases for the project
+    statement = (
+        select(TestCase)
+        .where(TestCase.project_id == project_id)
+        .where(TestCase.status == TestCaseStatus.ACTIVE)
+    )
+    all_test_cases = session.exec(statement).all()
+
+    # Filter by tags (JSON array in tags field)
+    matching = []
+    for tc in all_test_cases:
+        tc_tags = tc.get_tags()
+        if any(tag in tc_tags for tag in tags):
+            matching.append(tc)
+
+    return matching

@@ -301,3 +301,203 @@ class PageUpdate(SQLModel):
     name: Optional[str] = None
     path: Optional[str] = None
     description: Optional[str] = None
+
+
+# --- NotificationChannel ---
+
+class NotificationChannelType(str, Enum):
+    WEBHOOK = "webhook"
+    EMAIL = "email"
+    SLACK = "slack"
+
+
+class NotifyOn(str, Enum):
+    ALWAYS = "always"
+    FAILURE = "failure"
+    SUCCESS = "success"
+
+
+class NotificationChannelBase(SQLModel):
+    name: str = Field(index=True)
+    channel_type: str = Field(default="webhook")
+    enabled: bool = True
+    webhook_url: Optional[str] = None
+    webhook_template: Optional[str] = None
+    email_recipients: Optional[str] = None  # JSON array of emails
+    email_template: Optional[str] = None
+    notify_on: str = Field(default="failure")
+
+
+class NotificationChannel(NotificationChannelBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def get_email_recipients(self) -> list:
+        """Parse email recipients JSON."""
+        return json.loads(self.email_recipients) if self.email_recipients else []
+
+    def set_email_recipients(self, recipients: list):
+        """Set email recipients as JSON."""
+        self.email_recipients = json.dumps(recipients)
+
+
+class NotificationChannelCreate(NotificationChannelBase):
+    project_id: int
+
+
+class NotificationChannelRead(NotificationChannelBase):
+    id: int
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class NotificationChannelUpdate(SQLModel):
+    name: Optional[str] = None
+    channel_type: Optional[str] = None
+    enabled: Optional[bool] = None
+    webhook_url: Optional[str] = None
+    webhook_template: Optional[str] = None
+    email_recipients: Optional[str] = None
+    email_template: Optional[str] = None
+    notify_on: Optional[str] = None
+
+
+# --- Schedule ---
+
+class ScheduleTargetType(str, Enum):
+    TEST_CASE_IDS = "test_case_ids"
+    TAGS = "tags"
+
+
+class ScheduleBase(SQLModel):
+    name: str = Field(index=True)
+    description: Optional[str] = None
+    cron_expression: str
+    timezone: str = Field(default="UTC")
+    target_type: str = Field(default="test_case_ids")
+    target_test_case_ids: Optional[str] = None  # JSON array
+    target_tags: Optional[str] = None  # JSON array
+    browser: Optional[str] = None
+    retry_max: int = 0
+    retry_mode: Optional[str] = None
+    enabled: bool = True
+    notification_channel_ids: Optional[str] = None  # JSON array of channel IDs
+
+
+class Schedule(ScheduleBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    last_run_at: Optional[datetime] = None
+    next_run_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    scheduled_runs: List["ScheduledRun"] = Relationship(back_populates="schedule", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+
+    def get_target_test_case_ids(self) -> list:
+        """Parse target test case IDs JSON."""
+        return json.loads(self.target_test_case_ids) if self.target_test_case_ids else []
+
+    def set_target_test_case_ids(self, ids: list):
+        """Set target test case IDs as JSON."""
+        self.target_test_case_ids = json.dumps(ids)
+
+    def get_target_tags(self) -> list:
+        """Parse target tags JSON."""
+        return json.loads(self.target_tags) if self.target_tags else []
+
+    def set_target_tags(self, tags: list):
+        """Set target tags as JSON."""
+        self.target_tags = json.dumps(tags)
+
+    def get_notification_channel_ids(self) -> list:
+        """Parse notification channel IDs JSON."""
+        return json.loads(self.notification_channel_ids) if self.notification_channel_ids else []
+
+    def set_notification_channel_ids(self, ids: list):
+        """Set notification channel IDs as JSON."""
+        self.notification_channel_ids = json.dumps(ids)
+
+
+class ScheduleCreate(ScheduleBase):
+    project_id: int
+
+
+class ScheduleRead(ScheduleBase):
+    id: int
+    project_id: int
+    last_run_at: Optional[datetime]
+    next_run_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScheduleUpdate(SQLModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    cron_expression: Optional[str] = None
+    timezone: Optional[str] = None
+    target_type: Optional[str] = None
+    target_test_case_ids: Optional[str] = None
+    target_tags: Optional[str] = None
+    browser: Optional[str] = None
+    retry_max: Optional[int] = None
+    retry_mode: Optional[str] = None
+    enabled: Optional[bool] = None
+    notification_channel_ids: Optional[str] = None
+
+
+# --- ScheduledRun ---
+
+class ScheduledRunBase(SQLModel):
+    thread_id: str
+    status: RunStatus = RunStatus.PENDING
+    test_count: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    notifications_sent: Optional[str] = None  # JSON array of channel IDs
+    notification_errors: Optional[str] = None  # JSON object of channel_id -> error
+
+
+class ScheduledRun(ScheduledRunBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    schedule_id: int = Field(foreign_key="schedule.id", index=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    schedule: Schedule = Relationship(back_populates="scheduled_runs")
+
+    def get_notifications_sent(self) -> list:
+        """Parse notifications sent JSON."""
+        return json.loads(self.notifications_sent) if self.notifications_sent else []
+
+    def set_notifications_sent(self, ids: list):
+        """Set notifications sent as JSON."""
+        self.notifications_sent = json.dumps(ids)
+
+    def get_notification_errors(self) -> dict:
+        """Parse notification errors JSON."""
+        return json.loads(self.notification_errors) if self.notification_errors else {}
+
+    def set_notification_errors(self, errors: dict):
+        """Set notification errors as JSON."""
+        self.notification_errors = json.dumps(errors)
+
+
+class ScheduledRunCreate(ScheduledRunBase):
+    schedule_id: int
+    project_id: int
+
+
+class ScheduledRunRead(ScheduledRunBase):
+    id: int
+    schedule_id: int
+    project_id: int
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    created_at: datetime

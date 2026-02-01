@@ -66,15 +66,56 @@ async def get_available_browsers():
         await client.close()
 
 
-@router.get("/project/{project_id}", response_model=List[TestRunRead])
+class TestRunWithTestCase(TestRunRead):
+    """Test run with test case name."""
+    test_case_name: Optional[str] = None
+
+
+@router.get("/project/{project_id}", response_model=List[TestRunWithTestCase])
 def list_test_runs(
     project_id: int,
+    thread_id: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
     session: Session = Depends(get_session_dep)
 ):
-    """List all test runs for a project."""
-    return crud.get_test_runs_by_project(session, project_id, skip=skip, limit=limit)
+    """List all test runs for a project, optionally filtered by thread_id."""
+    if thread_id:
+        runs = crud.get_test_runs_by_thread_id(session, project_id, thread_id)
+    else:
+        runs = crud.get_test_runs_by_project(session, project_id, skip=skip, limit=limit)
+
+    # Add test case name to each run
+    result = []
+    for run in runs:
+        test_case_name = None
+        if run.test_case_id:
+            test_case = crud.get_test_case(session, run.test_case_id)
+            if test_case:
+                test_case_name = test_case.name
+
+        result.append(TestRunWithTestCase(
+            id=run.id,
+            project_id=run.project_id,
+            test_case_id=run.test_case_id,
+            trigger=run.trigger,
+            status=run.status,
+            thread_id=run.thread_id,
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            summary=run.summary,
+            error_count=run.error_count,
+            pass_count=run.pass_count,
+            created_at=run.created_at,
+            retry_attempt=run.retry_attempt,
+            max_retries=run.max_retries,
+            original_run_id=run.original_run_id,
+            retry_mode=run.retry_mode,
+            retry_reason=run.retry_reason,
+            test_case_name=test_case_name,
+        ))
+
+    return result
 
 
 @router.post("", response_model=TestRunRead)

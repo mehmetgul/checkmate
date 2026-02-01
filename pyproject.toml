@@ -18,6 +18,9 @@ dependencies = [
     "cryptography>=43.0.0",
     "python-dotenv>=1.0.0",
     "psycopg2-binary>=2.9.9",
+    "apscheduler>=3.10.0",
+    "croniter>=2.0.0",
+    "pytz>=2024.1",
 ]
 
 [build-system]
