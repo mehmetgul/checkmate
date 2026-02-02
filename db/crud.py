@@ -556,23 +556,21 @@ def try_claim_schedule_execution(session: Session, schedule_id: int, claim_windo
     Returns:
         True if this instance claimed the execution, False if another instance did
     """
-    from sqlalchemy import text
+    from sqlalchemy import update, or_
 
     now = datetime.utcnow()
     threshold = now - timedelta(seconds=claim_window_seconds)
 
     # Atomic UPDATE with condition - only succeeds if not recently claimed
-    # This works for both SQLite and PostgreSQL
-    result = session.execute(
-        text("""
-            UPDATE schedule
-            SET last_run_at = :now, updated_at = :now
-            WHERE id = :schedule_id
-              AND enabled = 1
-              AND (last_run_at IS NULL OR last_run_at < :threshold)
-        """),
-        {"schedule_id": schedule_id, "now": now, "threshold": threshold}
+    # Using SQLAlchemy ORM for cross-database compatibility (SQLite + PostgreSQL)
+    stmt = (
+        update(Schedule)
+        .where(Schedule.id == schedule_id)
+        .where(Schedule.enabled == True)
+        .where(or_(Schedule.last_run_at == None, Schedule.last_run_at < threshold))
+        .values(last_run_at=now, updated_at=now)
     )
+    result = session.execute(stmt)
     session.commit()
 
     # If rowcount is 1, we successfully claimed it
