@@ -117,7 +117,7 @@ Guidelines:
 9. IMPORTANT: If this is a follow-up request, MERGE with the previous plan - keep existing steps and add/modify as needed
 10. For style checks (colors, sizes), use assert_style with the CSS property and expected value
 11. If specific details are missing and NO matching persona/page exists, use placeholder like {{BUTTON_NAME}} and set needs_clarification=true
-12. CRITICAL: When using fixtures, do NOT include the fixture's steps in your test - start your steps from where the fixture ends (e.g., if login fixture selected, do NOT add login steps, start already logged in)"""),
+12. FIXTURES: If your test needs login/auth, use the login fixture (add ID to fixture_ids) and start your steps AFTER login (don't write login steps yourself)"""),
     ("human", "{query}")
 ])
 
@@ -221,7 +221,7 @@ def build_fixtures_context(project_id: Optional[str]) -> str:
     if not fixtures:
         return ""
 
-    context_parts = ["Available Fixtures (reusable setup sequences - use these instead of generating setup steps):"]
+    context_parts = ["## Available Fixtures (reusable setup sequences)"]
 
     for f in fixtures:
         steps = f.get_setup_steps()
@@ -234,13 +234,17 @@ def build_fixtures_context(project_id: Optional[str]) -> str:
         context_parts.append(f"  - Fixture ID {f.id}: '{f.name}'")
         if f.description:
             context_parts.append(f"    Description: {f.description}")
-        context_parts.append(f"    Setup: {step_summary}")
+        context_parts.append(f"    Steps: {step_summary}")
 
     context_parts.append("")
-    context_parts.append("CRITICAL: When you select a fixture, do NOT duplicate its steps in your test case!")
-    context_parts.append("- If using a login fixture: Do NOT include navigate to login, fill credentials, or click login button in your steps")
-    context_parts.append("- Your test steps should start AFTER the fixture's setup is complete (e.g., already logged in)")
-    context_parts.append("- Example: With login fixture, start directly with navigating to the feature you're testing")
+    context_parts.append("FIXTURE RULES:")
+    context_parts.append("1. If your test needs login/authentication, ALWAYS use the login fixture (add its ID to fixture_ids)")
+    context_parts.append("2. When you use a fixture, your test steps start AFTER the fixture completes")
+    context_parts.append("3. Do NOT write login/setup steps if you're using a fixture that already does that")
+    context_parts.append("")
+    context_parts.append("Example: Test 'verify dashboard shows user name' with login fixture:")
+    context_parts.append("  - fixture_ids: [1]  (the login fixture)")
+    context_parts.append("  - steps: navigate to /dashboard, assert_text 'Welcome'  (NO login steps needed)")
 
     return "\n".join(context_parts)
 
