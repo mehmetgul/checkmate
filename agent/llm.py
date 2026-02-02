@@ -113,7 +113,9 @@ def _get_azure_model(tier: LLMTier) -> AzureChatOpenAI:
         )
 
     api_key = _get_api_key("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_KEY_FUNCTION")
-    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+    # Tier-specific API version with fallback to shared version
+    version_env = f"AZURE_OPENAI_API_VERSION_{'DEFAULT' if tier == 'default' else 'FAST'}"
+    api_version = os.getenv(version_env) or os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
     http_client, async_http_client = _get_http_clients()
 
     kwargs = {
