@@ -41,6 +41,10 @@ class TestCaseModel(BaseModel):
     priority: str = Field(default="medium", description="Priority: low, medium, high, critical")
     tags: List[str] = Field(default_factory=list, description="Tags for categorization")
     steps: List[TestStepModel] = Field(description="Ordered list of test steps")
+    fixture_ids: List[int] = Field(
+        default_factory=list,
+        description="IDs of fixtures to use for setup (e.g., login fixture). If using fixtures, don't duplicate those setup steps."
+    )
 
 
 class BuilderResponse(BaseModel):
@@ -65,6 +69,8 @@ Project URL: {base_url}
 {app_context}
 
 {personas_and_pages}
+
+{fixtures_context}
 
 ## Previous User Messages (intent history)
 {previous_messages}
@@ -177,6 +183,38 @@ def build_personas_and_pages_context(project_id: Optional[int]) -> str:
     return "\n".join(context_parts)
 
 
+def build_fixtures_context(project_id: Optional[int]) -> str:
+    """Build context about available fixtures for the project."""
+    if not project_id:
+        return ""
+
+    with Session(engine) as session:
+        fixtures = crud.get_fixtures_by_project(session, project_id)
+
+    if not fixtures:
+        return ""
+
+    context_parts = ["## Available Fixtures (reusable setup sequences - use these instead of generating setup steps)"]
+
+    for f in fixtures:
+        steps = f.get_setup_steps()
+        # Summarize what the fixture does
+        step_actions = [s.get("action", "") for s in steps[:3]]
+        step_summary = ", ".join(step_actions)
+        if len(steps) > 3:
+            step_summary += f", ... ({len(steps)} steps total)"
+
+        context_parts.append(f"  - Fixture ID {f.id}: '{f.name}'")
+        if f.description:
+            context_parts.append(f"    Description: {f.description}")
+        context_parts.append(f"    Setup: {step_summary}")
+
+    context_parts.append("")
+    context_parts.append("IMPORTANT: If a fixture matches your test's setup needs (e.g., login), include its ID in fixture_ids and do NOT generate those setup steps. Start your test from where the fixture ends.")
+
+    return "\n".join(context_parts)
+
+
 async def build_test_case(
     current_message: str,
     previous_messages: List[str],
@@ -196,6 +234,9 @@ async def build_test_case(
 
     # Build personas and pages context
     personas_and_pages = build_personas_and_pages_context(project_id)
+
+    # Build fixtures context
+    fixtures_context = build_fixtures_context(project_id)
 
     # Format previous messages
     if previous_messages:
@@ -241,6 +282,7 @@ async def build_test_case(
         "base_url": base_url,
         "app_context": app_context,
         "personas_and_pages": personas_and_pages,
+        "fixtures_context": fixtures_context,
         "previous_messages": prev_msgs_formatted,
         "original_test_case": original_tc_formatted,
         "current_test_case": current_tc_formatted,

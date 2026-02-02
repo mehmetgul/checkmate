@@ -185,6 +185,7 @@ class ExecuteRequest(BaseModel):
     project_id: int
     steps: List[ExecuteStepRequest]
     browser: Optional[str] = None  # Browser ID (e.g., "chrome", "chromium-headless")
+    fixture_ids: Optional[List[int]] = None  # Fixture IDs to prepend setup steps
 
 
 class ExecuteStepResult(BaseModel):
@@ -260,6 +261,7 @@ def execute_steps(
             status=step_status,
             duration=step_duration,
             error=step_error,
+            fixture_name=step.get("fixture_name"),
         ))
 
         step_results.append(ExecuteStepResult(
@@ -302,10 +304,59 @@ def execute_steps(
 # Execute Steps with SSE Streaming
 # =============================================================================
 
+def _get_fixture_steps_by_ids(
+    session,
+    fixture_ids: List[int],
+    project_id: int,
+) -> tuple[List[dict], List[dict]]:
+    """Get resolved fixture steps to prepend to test steps.
+
+    Args:
+        session: Database session
+        fixture_ids: List of fixture IDs
+        project_id: Project ID for resolving references
+
+    Returns:
+        Tuple of (resolved_steps, display_steps) for fixtures
+    """
+    if not fixture_ids:
+        return [], []
+
+    # Get fixtures
+    fixtures = crud.get_fixtures_by_ids(session, fixture_ids)
+    if not fixtures:
+        logger.warning(f"No fixtures found for IDs: {fixture_ids}")
+        return [], []
+
+    all_fixture_steps = []
+    fixture_names = []
+
+    for fixture in fixtures:
+        steps = fixture.get_setup_steps()
+        if steps:
+            # Add fixture_name to each step for tracking
+            for step in steps:
+                step["fixture_name"] = fixture.name
+            all_fixture_steps.extend(steps)
+            fixture_names.append(fixture.name)
+
+    if not all_fixture_steps:
+        return [], []
+
+    logger.info(f"Prepending {len(all_fixture_steps)} fixture steps from: {', '.join(fixture_names)}")
+
+    # Resolve references in fixture steps
+    resolved_steps = resolve_references(session, project_id, all_fixture_steps)
+    display_steps = mask_passwords_in_steps(resolved_steps)
+
+    return resolved_steps, display_steps
+
+
 async def execute_steps_stream(
     project_id: int,
     steps: List[ExecuteStepRequest],
     browser: Optional[str] = None,
+    fixture_ids: Optional[List[int]] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream step execution results via SSE.
@@ -315,6 +366,7 @@ async def execute_steps_stream(
         project_id: Project ID
         steps: Steps to execute
         browser: Optional browser ID (e.g., "chrome", "chromium-headless")
+        fixture_ids: Optional fixture IDs to prepend setup steps
     """
     try:
         async with streaming_context() as (session, executor_client, use_simulation):
@@ -332,6 +384,16 @@ async def execute_steps_stream(
             resolved_steps = resolve_references(session, project_id, steps_as_dicts)
             # Create masked version for display (database storage)
             display_steps = mask_passwords_in_steps(resolved_steps)
+
+            # Prepend fixture steps if fixture_ids provided
+            if fixture_ids:
+                fixture_resolved, fixture_display = _get_fixture_steps_by_ids(
+                    session, fixture_ids, project_id
+                )
+                if fixture_resolved:
+                    resolved_steps = fixture_resolved + resolved_steps
+                    display_steps = fixture_display + display_steps
+                    logger.info(f"Total steps after fixture prepend: {len(resolved_steps)}")
 
             # Create test run
             test_run = crud.create_test_run(session, TestRunCreate(
@@ -355,7 +417,7 @@ async def execute_steps_stream(
                     action = step.get("action", "unknown")
                     description = step.get("description", "")
 
-                    yield sse_event("step_started", step_number=i + 1, action=action, description=description)
+                    yield sse_event("step_started", step_number=i + 1, action=action, description=description, fixture_name=display_step.get("fixture_name"))
 
                     await asyncio.sleep(0.3 + (i * 0.1))
                     step_status = StepStatus.PASSED
@@ -372,11 +434,12 @@ async def execute_steps_stream(
                         status=step_status,
                         duration=step_duration,
                         error=step_error,
+                        fixture_name=display_step.get("fixture_name"),
                     ))
 
                     pass_count += 1
 
-                    yield sse_event("step_completed", step_number=i + 1, action=action, description=description, status=step_status.value, duration=step_duration, error=step_error)
+                    yield sse_event("step_completed", step_number=i + 1, action=action, description=description, status=step_status.value, duration=step_duration, error=step_error, fixture_name=display_step.get("fixture_name"))
             else:
                 # Execute via playwright-http
                 execution_options = {"screenshot_on_failure": True}
@@ -403,6 +466,7 @@ async def execute_steps_stream(
                             **event,
                             "target": display_step.get("target"),
                             "value": display_step.get("value"),
+                            "fixture_name": display_step.get("fixture_name"),
                         }
                         yield f"data: {json.dumps(masked_event)}\n\n"
 
@@ -427,6 +491,7 @@ async def execute_steps_stream(
                             duration=event.get("duration", 0),
                             error=event.get("error"),
                             screenshot=event.get("screenshot"),
+                            fixture_name=display_step.get("fixture_name"),
                         ))
 
                         if step_status == StepStatus.PASSED:
@@ -439,6 +504,7 @@ async def execute_steps_stream(
                             **event,
                             "target": display_step.get("target"),
                             "value": display_step.get("value"),
+                            "fixture_name": display_step.get("fixture_name"),
                         }
                         yield f"data: {json.dumps(masked_event)}\n\n"
 
@@ -485,9 +551,15 @@ async def execute_steps_streaming(request: ExecuteRequest):
     Returns step-by-step results in real-time.
 
     Optionally specify a browser to use for execution.
+    Optionally specify fixture_ids to prepend fixture setup steps.
     """
     return StreamingResponse(
-        execute_steps_stream(request.project_id, request.steps, browser=request.browser),
+        execute_steps_stream(
+            request.project_id,
+            request.steps,
+            browser=request.browser,
+            fixture_ids=request.fixture_ids,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

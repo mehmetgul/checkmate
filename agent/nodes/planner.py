@@ -42,6 +42,10 @@ class TestPlanModel(BaseModel):
     """A complete test plan."""
     steps: List[TestStepModel] = Field(description="Ordered list of test steps")
     expected_outcome: str = Field(description="What success looks like for this test")
+    fixture_ids: List[int] = Field(
+        default=[],
+        description="IDs of fixtures to use for setup (e.g., login fixture). If using fixtures, don't duplicate those setup steps."
+    )
     needs_clarification: bool = Field(
         default=False,
         description="True if placeholders were used and user input is needed"
@@ -64,6 +68,8 @@ Feature to test: {feature}
 {conversation_context}
 
 {personas_and_pages}
+
+{fixtures_context}
 
 CRITICAL: JSON Output Format Examples
 When outputting steps, use this exact JSON structure:
@@ -198,6 +204,43 @@ def build_personas_and_pages_context(project_id: Optional[str]) -> str:
     return "\n".join(context_parts)
 
 
+def build_fixtures_context(project_id: Optional[str]) -> str:
+    """Build context about available fixtures for the project."""
+    if not project_id:
+        return ""
+
+    try:
+        pid = int(project_id)
+    except (ValueError, TypeError):
+        return ""
+
+    with Session(engine) as session:
+        fixtures = crud.get_fixtures_by_project(session, pid)
+
+    if not fixtures:
+        return ""
+
+    context_parts = ["Available Fixtures (reusable setup sequences - use these instead of generating setup steps):"]
+
+    for f in fixtures:
+        steps = f.get_setup_steps()
+        # Summarize what the fixture does
+        step_actions = [s.get("action", "") for s in steps[:3]]
+        step_summary = ", ".join(step_actions)
+        if len(steps) > 3:
+            step_summary += f", ... ({len(steps)} steps total)"
+
+        context_parts.append(f"  - Fixture ID {f.id}: '{f.name}'")
+        if f.description:
+            context_parts.append(f"    Description: {f.description}")
+        context_parts.append(f"    Setup: {step_summary}")
+
+    context_parts.append("")
+    context_parts.append("IMPORTANT: If a fixture matches your test's setup needs (e.g., login), include its ID in fixture_ids and do NOT generate those setup steps. Start your test from where the fixture ends.")
+
+    return "\n".join(context_parts)
+
+
 async def plan_test(state: AgentState) -> dict:
     """Convert natural language query to a test plan."""
     from langchain_core.messages import AIMessage
@@ -225,6 +268,12 @@ async def plan_test(state: AgentState) -> dict:
     # Build personas and pages context
     personas_and_pages = build_personas_and_pages_context(project_id)
 
+    # Build fixtures context (skip when generating fixtures to avoid circular dependencies)
+    if state.get("skip_fixtures_context"):
+        fixtures_context = ""
+    else:
+        fixtures_context = build_fixtures_context(project_id)
+
     chain = PLANNER_PROMPT | structured_model
 
     result = await chain.ainvoke({
@@ -233,6 +282,7 @@ async def plan_test(state: AgentState) -> dict:
         "app_context": app_context,
         "conversation_context": conversation_context,
         "personas_and_pages": personas_and_pages,
+        "fixtures_context": fixtures_context,
         "query": last_message
     })
 
@@ -250,9 +300,10 @@ async def plan_test(state: AgentState) -> dict:
             for step in result.steps
         ],
         "expected_outcome": result.expected_outcome,
+        "fixture_ids": result.fixture_ids,
     }
 
-    logger.info(f"Generated test plan with {len(result.steps)} steps")
+    logger.info(f"Generated test plan with {len(result.steps)} steps, fixtures: {result.fixture_ids}")
 
     # Get available personas and pages to filter valid template variables
     valid_templates = set()

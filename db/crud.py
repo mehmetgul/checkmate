@@ -11,11 +11,13 @@ from db.models import (
     TestRunStep, TestRunStepCreate,
     Persona, PersonaCreate, PersonaUpdate,
     Page, PageCreate, PageUpdate,
+    Fixture, FixtureCreate, FixtureUpdate,
+    FixtureState, FixtureStateCreate,
     NotificationChannel, NotificationChannelCreate, NotificationChannelUpdate,
     Schedule, ScheduleCreate, ScheduleUpdate,
     ScheduledRun, ScheduledRunCreate,
 )
-from db.encryption import encrypt_password
+from db.encryption import encrypt_password, encrypt_data, decrypt_data
 
 
 # --- Project CRUD ---
@@ -378,6 +380,196 @@ def delete_page(session: Session, page_id: int) -> bool:
     session.delete(db_page)
     session.commit()
     return True
+
+
+# --- Fixture CRUD ---
+
+def create_fixture(session: Session, fixture: FixtureCreate) -> Fixture:
+    """Create a new fixture."""
+    db_fixture = Fixture.model_validate(fixture)
+    session.add(db_fixture)
+    session.commit()
+    session.refresh(db_fixture)
+    return db_fixture
+
+
+def get_fixture(session: Session, fixture_id: int) -> Optional[Fixture]:
+    """Get a fixture by ID."""
+    return session.get(Fixture, fixture_id)
+
+
+def get_fixtures_by_project(session: Session, project_id: int) -> List[Fixture]:
+    """Get all fixtures for a project."""
+    statement = select(Fixture).where(Fixture.project_id == project_id)
+    return session.exec(statement).all()
+
+
+def get_fixtures_by_ids(session: Session, fixture_ids: List[int]) -> List[Fixture]:
+    """Get fixtures by their IDs."""
+    if not fixture_ids:
+        return []
+    statement = select(Fixture).where(Fixture.id.in_(fixture_ids))
+    return session.exec(statement).all()
+
+
+def update_fixture(session: Session, fixture_id: int, data: FixtureUpdate) -> Optional[Fixture]:
+    """Update a fixture."""
+    db_fixture = session.get(Fixture, fixture_id)
+    if not db_fixture:
+        return None
+
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        if hasattr(db_fixture, key):
+            setattr(db_fixture, key, value)
+
+    db_fixture.updated_at = datetime.utcnow()
+    session.add(db_fixture)
+    session.commit()
+    session.refresh(db_fixture)
+    return db_fixture
+
+
+def delete_fixture(session: Session, fixture_id: int) -> bool:
+    """Delete a fixture and all related fixture states."""
+    db_fixture = session.get(Fixture, fixture_id)
+    if not db_fixture:
+        return False
+
+    session.delete(db_fixture)
+    session.commit()
+    return True
+
+
+# --- FixtureState CRUD ---
+
+def create_fixture_state(
+    session: Session,
+    fixture_id: int,
+    project_id: int,
+    cookies: Optional[str] = None,
+    local_storage: Optional[str] = None,
+    session_storage: Optional[str] = None,
+    browser: Optional[str] = None,
+    expires_at: Optional[datetime] = None
+) -> FixtureState:
+    """Create a new fixture state with encrypted data."""
+    db_state = FixtureState(
+        fixture_id=fixture_id,
+        project_id=project_id,
+        encrypted_cookies=encrypt_data(cookies) if cookies else None,
+        encrypted_local_storage=encrypt_data(local_storage) if local_storage else None,
+        encrypted_session_storage=encrypt_data(session_storage) if session_storage else None,
+        browser=browser,
+        expires_at=expires_at,
+    )
+    session.add(db_state)
+    session.commit()
+    session.refresh(db_state)
+    return db_state
+
+
+def get_fixture_state(session: Session, state_id: int) -> Optional[FixtureState]:
+    """Get a fixture state by ID."""
+    return session.get(FixtureState, state_id)
+
+
+def get_valid_fixture_state(
+    session: Session,
+    fixture_id: int,
+    browser: Optional[str] = None
+) -> Optional[FixtureState]:
+    """Get a valid (non-expired) fixture state for a fixture.
+
+    Args:
+        session: Database session
+        fixture_id: Fixture ID
+        browser: Optional browser filter (e.g., 'chromium-headless')
+
+    Returns:
+        Valid FixtureState or None if no valid state exists
+    """
+    now = datetime.utcnow()
+
+    statement = (
+        select(FixtureState)
+        .where(FixtureState.fixture_id == fixture_id)
+        .where(FixtureState.expires_at > now)
+        .order_by(FixtureState.captured_at.desc())
+    )
+
+    if browser:
+        statement = statement.where(FixtureState.browser == browser)
+
+    return session.exec(statement).first()
+
+
+def get_decrypted_fixture_state(session: Session, state: FixtureState) -> dict:
+    """Decrypt fixture state data.
+
+    Args:
+        session: Database session (unused but kept for consistency)
+        state: FixtureState to decrypt
+
+    Returns:
+        dict with decrypted cookies, local_storage, session_storage
+    """
+    import json
+
+    return {
+        "cookies": json.loads(decrypt_data(state.encrypted_cookies)) if state.encrypted_cookies else None,
+        "local_storage": json.loads(decrypt_data(state.encrypted_local_storage)) if state.encrypted_local_storage else None,
+        "session_storage": json.loads(decrypt_data(state.encrypted_session_storage)) if state.encrypted_session_storage else None,
+        "browser": state.browser,
+    }
+
+
+def delete_fixture_state(session: Session, state_id: int) -> bool:
+    """Delete a fixture state."""
+    db_state = session.get(FixtureState, state_id)
+    if not db_state:
+        return False
+
+    session.delete(db_state)
+    session.commit()
+    return True
+
+
+def delete_fixture_states_by_fixture(session: Session, fixture_id: int) -> int:
+    """Delete all fixture states for a fixture.
+
+    Returns:
+        Number of states deleted
+    """
+    states = session.exec(
+        select(FixtureState).where(FixtureState.fixture_id == fixture_id)
+    ).all()
+
+    count = len(states)
+    for state in states:
+        session.delete(state)
+
+    session.commit()
+    return count
+
+
+def delete_expired_fixture_states(session: Session) -> int:
+    """Delete all expired fixture states.
+
+    Returns:
+        Number of states deleted
+    """
+    now = datetime.utcnow()
+    expired_states = session.exec(
+        select(FixtureState).where(FixtureState.expires_at <= now)
+    ).all()
+
+    count = len(expired_states)
+    for state in expired_states:
+        session.delete(state)
+
+    session.commit()
+    return count
 
 
 # --- Stats ---

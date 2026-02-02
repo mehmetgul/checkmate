@@ -112,86 +112,175 @@ async def execute_scheduled_run(schedule_id: int, skip_claim: bool = False):
                 logger.warning(f"Test case {tc_id} has no steps, skipping")
                 continue
 
+            # Get fixture steps if test case has fixtures
+            fixture_ids = test_case.get_fixture_ids()
+            fixture_steps = []
+            if fixture_ids:
+                fixtures = crud.get_fixtures_by_ids(session, fixture_ids)
+                fixture_names = []
+                for fixture in fixtures:
+                    f_steps = fixture.get_setup_steps()
+                    if f_steps:
+                        for step in f_steps:
+                            step["fixture_name"] = fixture.name
+                        fixture_steps.extend(f_steps)
+                        fixture_names.append(fixture.name)
+                if fixture_steps:
+                    logger.info(f"Prepending {len(fixture_steps)} fixture steps from: {', '.join(fixture_names)}")
+
+            # Combine fixture steps + test steps
+            all_steps = fixture_steps + steps_data
+
             # Resolve references
-            resolved_steps = resolve_references(session, schedule.project_id, steps_data)
+            resolved_steps = resolve_references(session, schedule.project_id, all_steps)
             display_steps = mask_passwords_in_steps(resolved_steps)
 
-            # Create test run
-            test_run = crud.create_test_run(session, TestRunCreate(
-                project_id=schedule.project_id,
-                test_case_id=tc_id,
-                trigger=RunTrigger.SCHEDULED,
-                status=RunStatus.RUNNING,
-                thread_id=thread_id,
-            ))
-            crud.update_test_run(session, test_run.id, {
-                "started_at": datetime.utcnow(),
-                "max_retries": schedule.retry_max,
-                "retry_mode": schedule.retry_mode,
-            })
+            # Retry configuration - use schedule settings or defaults (2 retries with intelligent mode)
+            max_retries = schedule.retry_max if schedule.retry_max else 2
+            retry_mode = schedule.retry_mode if schedule.retry_mode else "intelligent"
 
-            # Execute test
-            test_pass_count = 0
-            test_error_count = 0
+            # Execute with retry loop
+            current_attempt = 0
+            original_run_id = None
+            final_status = RunStatus.FAILED
+            last_failure_info = None
 
-            try:
-                execution_options = {"screenshot_on_failure": True}
-                if schedule.browser:
-                    execution_options["browser"] = schedule.browser
+            while current_attempt <= max_retries:
+                # Create test run
+                test_run = crud.create_test_run(session, TestRunCreate(
+                    project_id=schedule.project_id,
+                    test_case_id=tc_id,
+                    trigger=RunTrigger.SCHEDULED,
+                    status=RunStatus.RUNNING,
+                    thread_id=thread_id,
+                ))
 
-                async for event in executor_client.execute_stream(
-                    base_url=project.base_url,
-                    steps=resolved_steps,
-                    test_id=str(tc_id),
-                    options=execution_options,
-                ):
-                    event_type = event.get("type")
+                # Track original run ID for retries
+                if current_attempt == 0:
+                    original_run_id = test_run.id
 
-                    if event_type == "step_completed":
-                        from db.models import StepStatus, TestRunStepCreate
-                        step_number = event.get("step_number", 0)
-                        status = event.get("status", "failed")
-                        step_status = StepStatus.PASSED if status == "passed" else StepStatus.FAILED
+                crud.update_test_run(session, test_run.id, {
+                    "started_at": datetime.utcnow(),
+                    "retry_attempt": current_attempt,
+                    "max_retries": max_retries,
+                    "original_run_id": original_run_id if current_attempt > 0 else None,
+                    "retry_mode": retry_mode,
+                })
 
-                        step_idx = step_number - 1
-                        display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
+                logger.info(f"Executing test case {tc_id}, attempt {current_attempt + 1}/{max_retries + 1}")
 
-                        crud.create_test_run_step(session, TestRunStepCreate(
-                            test_run_id=test_run.id,
-                            test_case_id=tc_id,
-                            step_number=step_number,
-                            action=display_step.get("action", "unknown"),
-                            target=display_step.get("target"),
-                            value=display_step.get("value"),
-                            status=step_status,
-                            duration=event.get("duration", 0),
-                            error=event.get("error"),
-                            screenshot=event.get("screenshot"),
-                        ))
+                # Execute test
+                test_pass_count = 0
+                test_error_count = 0
+                last_failure_info = None
 
-                        if step_status == StepStatus.PASSED:
-                            test_pass_count += 1
-                        else:
+                try:
+                    execution_options = {"screenshot_on_failure": True}
+                    if schedule.browser:
+                        execution_options["browser"] = schedule.browser
+
+                    async for event in executor_client.execute_stream(
+                        base_url=project.base_url,
+                        steps=resolved_steps,
+                        test_id=str(tc_id),
+                        options=execution_options,
+                    ):
+                        event_type = event.get("type")
+
+                        if event_type == "step_completed":
+                            from db.models import StepStatus, TestRunStepCreate
+                            step_number = event.get("step_number", 0)
+                            status = event.get("status", "failed")
+                            step_status = StepStatus.PASSED if status == "passed" else StepStatus.FAILED
+
+                            step_idx = step_number - 1
+                            display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
+
+                            crud.create_test_run_step(session, TestRunStepCreate(
+                                test_run_id=test_run.id,
+                                test_case_id=tc_id,
+                                step_number=step_number,
+                                action=display_step.get("action", "unknown"),
+                                target=display_step.get("target"),
+                                value=display_step.get("value"),
+                                status=step_status,
+                                duration=event.get("duration", 0),
+                                error=event.get("error"),
+                                screenshot=event.get("screenshot"),
+                                fixture_name=display_step.get("fixture_name"),
+                            ))
+
+                            if step_status == StepStatus.PASSED:
+                                test_pass_count += 1
+                            else:
+                                test_error_count += 1
+                                # Capture failure info for potential retry decision
+                                last_failure_info = {
+                                    "action": display_step.get("action", "unknown"),
+                                    "error": event.get("error"),
+                                }
+
+                        elif event_type == "error":
+                            logger.error(f"Executor error for test case {tc_id}: {event.get('error')}")
                             test_error_count += 1
+                            last_failure_info = {"action": "executor", "error": event.get("error")}
+                            break
 
-                    elif event_type == "error":
-                        logger.error(f"Executor error for test case {tc_id}: {event.get('error')}")
-                        test_error_count += 1
+                except Exception as e:
+                    logger.error(f"Error executing test case {tc_id}: {e}")
+                    test_error_count += 1
+                    last_failure_info = {"action": "exception", "error": str(e)}
+
+                # Update test run
+                run_status = RunStatus.PASSED if test_error_count == 0 else RunStatus.FAILED
+                crud.update_test_run(session, test_run.id, {
+                    "status": run_status,
+                    "completed_at": datetime.utcnow(),
+                    "pass_count": test_pass_count,
+                    "error_count": test_error_count,
+                    "summary": f"Executed {test_pass_count + test_error_count} steps: {test_pass_count} passed, {test_error_count} failed",
+                })
+
+                # Check if passed or should retry
+                if run_status == RunStatus.PASSED:
+                    final_status = RunStatus.PASSED
+                    break
+                elif current_attempt < max_retries:
+                    # Decide whether to retry
+                    should_retry = True
+
+                    if retry_mode == "intelligent" and last_failure_info:
+                        # Use LLM classifier for intelligent retry
+                        try:
+                            from agent.nodes.classifier import classify_failure
+                            classification = await classify_failure(
+                                action=last_failure_info.get("action", ""),
+                                target=None,
+                                value=None,
+                                error_message=last_failure_info.get("error", ""),
+                            )
+                            should_retry = classification.get("retryable", True)
+                            retry_reason = classification.get("reason", "")
+                            logger.info(f"Intelligent retry classification: retryable={should_retry}, reason={retry_reason}")
+
+                            if should_retry:
+                                # Update retry reason for next attempt
+                                crud.update_test_run(session, test_run.id, {"retry_reason": retry_reason})
+                        except Exception as e:
+                            logger.warning(f"Failed to classify failure, defaulting to retry: {e}")
+                            should_retry = True
+
+                    if should_retry:
+                        logger.info(f"Test case {tc_id} failed, retrying (attempt {current_attempt + 2}/{max_retries + 1})")
+                        current_attempt += 1
+                        continue
+                    else:
+                        logger.info(f"Test case {tc_id} failed, not retryable")
+                        final_status = RunStatus.FAILED
                         break
-
-            except Exception as e:
-                logger.error(f"Error executing test case {tc_id}: {e}")
-                test_error_count += 1
-
-            # Update test run
-            final_status = RunStatus.PASSED if test_error_count == 0 else RunStatus.FAILED
-            crud.update_test_run(session, test_run.id, {
-                "status": final_status,
-                "completed_at": datetime.utcnow(),
-                "pass_count": test_pass_count,
-                "error_count": test_error_count,
-                "summary": f"Executed {test_pass_count + test_error_count} steps: {test_pass_count} passed, {test_error_count} failed",
-            })
+                else:
+                    final_status = RunStatus.FAILED
+                    break
 
             if final_status == RunStatus.PASSED:
                 pass_count += 1
@@ -199,9 +288,9 @@ async def execute_scheduled_run(schedule_id: int, skip_claim: bool = False):
                 fail_count += 1
 
         # Update scheduled run with final results
-        final_status = RunStatus.PASSED if fail_count == 0 else RunStatus.FAILED
+        overall_status = RunStatus.PASSED if fail_count == 0 else RunStatus.FAILED
         crud.update_scheduled_run(session, scheduled_run.id, {
-            "status": final_status,
+            "status": overall_status,
             "completed_at": datetime.utcnow(),
             "pass_count": pass_count,
             "fail_count": fail_count,

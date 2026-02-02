@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Literal, Optional, AsyncGenerator
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -17,6 +17,7 @@ from db.models import (
     TestRun, TestRunCreate, TestRunRead,
     TestRunStep, TestRunStepCreate, TestRunStepRead,
     RunStatus, RunTrigger, StepStatus,
+    Fixture, FixtureScope,
 )
 from db import crud
 from agent.utils.resolver import resolve_references, mask_passwords_in_steps
@@ -212,6 +213,7 @@ def run_test_case(
             value=step_data.get("value"),
             status=StepStatus.PASSED,  # Simulated - all pass for now
             duration=100 + (i * 50),  # Simulated duration
+            fixture_name=step_data.get("fixture_name"),
         ))
         created_steps.append(step)
         pass_count += 1
@@ -254,6 +256,68 @@ class RetryConfig(BaseModel):
     retry_mode: Literal["intelligent", "simple"] = "intelligent"  # intelligent uses LLM, simple always retries
 
 
+def _get_fixture_steps(
+    session,
+    test_case,
+    project_id: int,
+) -> tuple[List[dict], List[dict]]:
+    """Get resolved fixture steps to prepend to test steps.
+
+    Fixtures run fresh every time - no caching, no state capture.
+    Steps are prepended to test steps and run in one browser session.
+
+    Args:
+        session: Database session
+        test_case: Test case with fixture_ids
+        project_id: Project ID for resolving references
+
+    Returns:
+        Tuple of (resolved_steps, display_steps) for fixtures
+    """
+    fixture_ids = test_case.get_fixture_ids()
+    if not fixture_ids:
+        return [], []
+
+    # Get fixtures
+    fixtures = crud.get_fixtures_by_ids(session, fixture_ids)
+    if not fixtures:
+        logger.warning(f"No fixtures found for IDs: {fixture_ids}")
+        return [], []
+
+    all_fixture_steps = []
+    fixture_names = []
+
+    for fixture in fixtures:
+        steps = fixture.get_setup_steps()
+        if steps:
+            # Add fixture_name to each step for tracking
+            for step in steps:
+                step["fixture_name"] = fixture.name
+            all_fixture_steps.extend(steps)
+            fixture_names.append(fixture.name)
+
+    if not all_fixture_steps:
+        return [], []
+
+    logger.info(f"Prepending {len(all_fixture_steps)} fixture steps from: {', '.join(fixture_names)}")
+
+    # Resolve references in fixture steps
+    resolved_steps = resolve_references(session, project_id, all_fixture_steps)
+    display_steps = mask_passwords_in_steps(resolved_steps)
+
+    return resolved_steps, display_steps
+
+
+def _merge_browser_state(target: dict, source: dict) -> None:
+    """Merge source browser state into target."""
+    if source.get("cookies"):
+        target["cookies"].extend(source["cookies"])
+    if source.get("local_storage"):
+        target["local_storage"].update(source["local_storage"])
+    if source.get("session_storage"):
+        target["session_storage"].update(source["session_storage"])
+
+
 async def _execute_single_run(
     session,
     executor_client,
@@ -276,6 +340,9 @@ async def _execute_single_run(
 
     Also yields a special _run_result event (not sent to client) containing
     the failure info needed for retry decisions.
+
+    Fixture steps are prepended to test steps before calling this function,
+    so everything runs in one fresh browser session.
     """
     test_case_id = test_case.id
 
@@ -322,7 +389,7 @@ async def _execute_single_run(
             description = step_data.get("description", f"Step {i + 1}")
 
             logger.info(f"Executing step {i + 1}/{len(resolved_steps)}: {action} - {description[:50]}")
-            yield sse_event("step_started", step_number=i + 1, action=action, description=description)
+            yield sse_event("step_started", step_number=i + 1, action=action, description=description, fixture_name=display_step.get("fixture_name"))
 
             await asyncio.sleep(0.3 + (i * 0.1))
             step_status = StepStatus.PASSED
@@ -339,13 +406,14 @@ async def _execute_single_run(
                 status=step_status,
                 duration=step_duration,
                 error=step_error,
+                fixture_name=display_step.get("fixture_name"),
             ))
 
             pass_count += 1
-            yield sse_event("step_completed", step_number=i + 1, action=action, description=description, status=step_status.value, duration=step_duration, error=step_error)
+            yield sse_event("step_completed", step_number=i + 1, action=action, description=description, status=step_status.value, duration=step_duration, error=step_error, fixture_name=display_step.get("fixture_name"))
     else:
-        # Execute via playwright-http
-        logger.info(f"Executing via playwright-http: base_url={project.base_url}")
+        # Execute via playwright-http (fixture steps are prepended, runs fresh every time)
+        logger.info(f"Executing via playwright-http: base_url={project.base_url}, steps={len(resolved_steps)}")
         execution_options = {"screenshot_on_failure": True}
         if browser:
             execution_options["browser"] = browser
@@ -372,6 +440,7 @@ async def _execute_single_run(
                     **event,
                     "target": display_step.get("target"),
                     "value": display_step.get("value"),
+                    "fixture_name": display_step.get("fixture_name"),
                 }
                 yield f"data: {json.dumps(masked_event)}\n\n"
 
@@ -412,6 +481,7 @@ async def _execute_single_run(
                     duration=duration,
                     error=event.get("error"),
                     screenshot=event.get("screenshot"),
+                    fixture_name=display_step.get("fixture_name"),
                 ))
 
                 if step_status == StepStatus.PASSED:
@@ -431,6 +501,7 @@ async def _execute_single_run(
                     **event,
                     "target": display_step.get("target"),
                     "value": display_step.get("value"),
+                    "fixture_name": display_step.get("fixture_name"),
                 }
                 yield f"data: {json.dumps(masked_event)}\n\n"
 
@@ -528,6 +599,32 @@ async def run_test_case_stream(
             # Resolve persona/page references in steps
             resolved_steps = resolve_references(session, test_case.project_id, steps_data)
             display_steps = mask_passwords_in_steps(resolved_steps)
+
+            # Handle fixtures - prepend fixture steps to test steps (fresh every time)
+            fixture_ids = test_case.get_fixture_ids()
+            if fixture_ids and not use_simulation:
+                logger.info(f"Test case has fixtures: {fixture_ids}")
+                yield sse_event("fixtures_loading", fixture_ids=fixture_ids)
+
+                try:
+                    fixture_resolved, fixture_display = _get_fixture_steps(
+                        session=session,
+                        test_case=test_case,
+                        project_id=test_case.project_id,
+                    )
+                    if fixture_resolved:
+                        # Prepend fixture steps to test steps
+                        resolved_steps = fixture_resolved + resolved_steps
+                        display_steps = fixture_display + display_steps
+                        yield sse_event(
+                            "fixtures_loaded",
+                            fixture_steps=len(fixture_resolved),
+                            total_steps=len(resolved_steps),
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to load fixtures: {e}")
+                    yield sse_warning(f"Failed to load fixtures: {e}")
+                    # Continue without fixtures
 
             original_run_id = None
             current_attempt = 0
@@ -758,7 +855,7 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
                         value = display_step.get("value")  # Masked
                         description = step_data.get("description", f"Step {i + 1}")
 
-                        yield sse_event("step_started", test_case_id=test_case.id, step_number=i + 1, action=action, description=description)
+                        yield sse_event("step_started", test_case_id=test_case.id, step_number=i + 1, action=action, description=description, fixture_name=display_step.get("fixture_name"))
 
                         await asyncio.sleep(0.2)
                         step_status = StepStatus.PASSED
@@ -775,11 +872,12 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
                             status=step_status,
                             duration=step_duration,
                             error=step_error,
+                            fixture_name=display_step.get("fixture_name"),
                         ))
 
                         pass_count += 1
 
-                        yield sse_event("step_completed", test_case_id=test_case.id, step_number=i + 1, status=step_status.value, duration=step_duration)
+                        yield sse_event("step_completed", test_case_id=test_case.id, step_number=i + 1, status=step_status.value, duration=step_duration, fixture_name=display_step.get("fixture_name"))
                 else:
                     # Execute via playwright-http
                     execution_options = {"screenshot_on_failure": True}
@@ -809,6 +907,7 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
                                 "test_case_id": test_case.id,
                                 "target": display_step.get("target"),
                                 "value": display_step.get("value"),
+                                "fixture_name": display_step.get("fixture_name"),
                             }
                             yield f"data: {json.dumps(masked_event)}\n\n"
 
@@ -833,6 +932,7 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
                                 duration=event.get("duration", 0),
                                 error=event.get("error"),
                                 screenshot=event.get("screenshot"),
+                                fixture_name=display_step.get("fixture_name"),
                             ))
 
                             if step_status == StepStatus.PASSED:
@@ -846,6 +946,7 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
                                 "test_case_id": test_case.id,
                                 "target": display_step.get("target"),
                                 "value": display_step.get("value"),
+                                "fixture_name": display_step.get("fixture_name"),
                             }
                             yield f"data: {json.dumps(masked_event)}\n\n"
 

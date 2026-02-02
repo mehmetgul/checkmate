@@ -79,6 +79,7 @@ class Project(ProjectBase, table=True):
     test_runs: List["TestRun"] = Relationship(back_populates="project")
     personas: List["Persona"] = Relationship(back_populates="project")
     pages: List["Page"] = Relationship(back_populates="project")
+    fixtures: List["Fixture"] = Relationship(back_populates="project")
 
     def get_config(self) -> dict:
         """Parse config JSON."""
@@ -108,6 +109,7 @@ class TestCaseBase(SQLModel):
     steps: str  # JSON array of steps
     expected_result: Optional[str] = None
     tags: Optional[str] = None  # JSON array
+    fixture_ids: Optional[str] = None  # JSON array of fixture IDs
     priority: Priority = Priority.MEDIUM
     status: TestCaseStatus = TestCaseStatus.ACTIVE
 
@@ -138,6 +140,14 @@ class TestCase(TestCaseBase, table=True):
         """Set tags as JSON."""
         self.tags = json.dumps(tags)
 
+    def get_fixture_ids(self) -> list:
+        """Parse fixture_ids JSON."""
+        return json.loads(self.fixture_ids) if self.fixture_ids else []
+
+    def set_fixture_ids(self, ids: list):
+        """Set fixture_ids as JSON."""
+        self.fixture_ids = json.dumps(ids)
+
 
 class TestCaseCreate(TestCaseBase):
     project_id: int
@@ -149,6 +159,7 @@ class TestCaseRead(TestCaseBase):
     created_at: datetime
     updated_at: datetime
     created_by: Optional[str]
+    fixture_ids: Optional[str] = None
 
 
 # --- TestRun ---
@@ -218,6 +229,7 @@ class TestRunStepBase(SQLModel):
     duration: Optional[int] = None  # Milliseconds
     error: Optional[str] = None
     logs: Optional[str] = None  # JSON
+    fixture_name: Optional[str] = None  # Name of fixture if this is a fixture step
 
 
 class TestRunStep(TestRunStepBase, table=True):
@@ -309,6 +321,99 @@ class PageUpdate(SQLModel):
     name: Optional[str] = None
     path: Optional[str] = None
     description: Optional[str] = None
+
+
+# --- Fixture ---
+
+class FixtureScope(str, Enum):
+    TEST = "test"       # Fresh setup per test (no state reuse)
+    CACHED = "cached"   # Reuse state until TTL expires
+
+
+class FixtureBase(SQLModel):
+    name: str = Field(index=True)
+    description: Optional[str] = None
+    setup_steps: str  # JSON array of steps
+    scope: str = Field(default="cached")  # test or cached
+    cache_ttl_seconds: int = Field(default=3600)  # Default 1 hour for cached scope
+
+
+class Fixture(FixtureBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    project: "Project" = Relationship(back_populates="fixtures")
+    states: List["FixtureState"] = Relationship(back_populates="fixture", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+
+    def get_setup_steps(self) -> list:
+        """Parse setup_steps JSON."""
+        return json.loads(self.setup_steps) if self.setup_steps else []
+
+    def set_setup_steps(self, steps: list):
+        """Set setup_steps as JSON."""
+        self.setup_steps = json.dumps(steps)
+
+
+class FixtureCreate(FixtureBase):
+    project_id: int
+
+
+class FixtureRead(FixtureBase):
+    id: int
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer('created_at', 'updated_at')
+    def serialize_dt(self, dt: Optional[datetime], _info) -> Optional[str]:
+        return serialize_datetime_utc(dt)
+
+
+class FixtureUpdate(SQLModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    setup_steps: Optional[str] = None
+    scope: Optional[str] = None
+    cache_ttl_seconds: Optional[int] = None
+
+
+# --- FixtureState (cached browser state) ---
+
+class FixtureStateBase(SQLModel):
+    encrypted_cookies: Optional[str] = None
+    encrypted_local_storage: Optional[str] = None
+    encrypted_session_storage: Optional[str] = None
+    browser: Optional[str] = None
+
+
+class FixtureState(FixtureStateBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    fixture_id: int = Field(foreign_key="fixture.id", index=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    captured_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: Optional[datetime] = None
+
+    fixture: "Fixture" = Relationship(back_populates="states")
+
+
+class FixtureStateCreate(FixtureStateBase):
+    fixture_id: int
+    project_id: int
+    expires_at: Optional[datetime] = None
+
+
+class FixtureStateRead(FixtureStateBase):
+    id: int
+    fixture_id: int
+    project_id: int
+    captured_at: datetime
+    expires_at: Optional[datetime]
+
+    @field_serializer('captured_at', 'expires_at')
+    def serialize_dt(self, dt: Optional[datetime], _info) -> Optional[str]:
+        return serialize_datetime_utc(dt)
 
 
 # --- NotificationChannel ---
