@@ -13,7 +13,34 @@ from core.logging import get_logger
 from db.session import get_session
 from db import crud
 
+# Try to use zoneinfo (Python 3.9+) as fallback for timezone handling
+try:
+    from zoneinfo import ZoneInfo
+    HAS_ZONEINFO = True
+except ImportError:
+    HAS_ZONEINFO = False
+
 logger = get_logger(__name__)
+
+
+def get_timezone(tz_name: str):
+    """Get a timezone object, trying multiple methods for compatibility."""
+    # First try pytz
+    try:
+        return pytz.timezone(tz_name)
+    except Exception as e:
+        logger.warning(f"pytz failed for timezone {tz_name}: {e}")
+
+    # Fallback to zoneinfo if available
+    if HAS_ZONEINFO:
+        try:
+            return ZoneInfo(tz_name)
+        except Exception as e:
+            logger.warning(f"zoneinfo failed for timezone {tz_name}: {e}")
+
+    # Last resort: return UTC
+    logger.error(f"Could not load timezone {tz_name}, falling back to UTC")
+    return pytz.UTC
 
 
 class SchedulerService:
@@ -80,10 +107,13 @@ class SchedulerService:
         job_id = f"schedule_{schedule.id}"
 
         try:
+            # Get timezone with fallback handling
+            tz = get_timezone(schedule.timezone)
+
             # Parse cron expression
             trigger = CronTrigger.from_crontab(
                 schedule.cron_expression,
-                timezone=pytz.timezone(schedule.timezone)
+                timezone=tz
             )
 
             # Add the job
@@ -97,7 +127,6 @@ class SchedulerService:
             )
 
             # Calculate and update next run time (store as naive UTC)
-            tz = pytz.timezone(schedule.timezone)
             now = datetime.now(tz)
             cron = croniter(schedule.cron_expression, now)
             next_run_local = cron.get_next(datetime)

@@ -14,6 +14,7 @@ from db.models import RunStatus, RunTrigger, ScheduledRunCreate, TestRunCreate
 from db import crud
 from agent.executor_client import PlaywrightExecutorClient
 from agent.utils.resolver import resolve_references, mask_passwords_in_steps
+from scheduler.service import get_timezone
 
 logger = get_logger(__name__)
 
@@ -64,7 +65,7 @@ async def execute_scheduled_run(schedule_id: int, skip_claim: bool = False):
             logger.warning(f"No test cases found for schedule {schedule_id}")
             # Update last run time even if no tests
             now = datetime.utcnow()
-            tz = pytz.timezone(schedule.timezone)
+            tz = get_timezone(schedule.timezone)
             cron = croniter(schedule.cron_expression, datetime.now(tz))
             next_run_local = cron.get_next(datetime)
             # Convert to UTC (naive) for storage
@@ -208,7 +209,7 @@ async def execute_scheduled_run(schedule_id: int, skip_claim: bool = False):
 
         # Update schedule run times
         now = datetime.utcnow()
-        tz = pytz.timezone(schedule.timezone)
+        tz = get_timezone(schedule.timezone)
         cron = croniter(schedule.cron_expression, datetime.now(tz))
         next_run_local = cron.get_next(datetime)
         # Convert to UTC (naive) for storage
