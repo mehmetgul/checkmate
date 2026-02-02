@@ -62,17 +62,32 @@ def run_migration(conn: sqlite3.Connection, migration_file: Path) -> bool:
     cursor = conn.cursor()
 
     # Execute each statement separately (SQLite doesn't support multiple statements)
+    # Commit after each statement so tables exist before indexes are created
     for statement in sql.split(";"):
         statement = statement.strip()
-        if statement and not statement.startswith("--"):
-            try:
-                cursor.execute(statement)
-            except sqlite3.OperationalError as e:
-                # Handle "duplicate column" errors gracefully
-                if "duplicate column" in str(e).lower():
-                    print(f"    Column already exists, skipping: {e}")
-                else:
-                    raise
+        if not statement:
+            continue
+
+        # Remove leading comment lines to get to the actual SQL
+        lines = statement.split("\n")
+        sql_lines = [line for line in lines if not line.strip().startswith("--")]
+        clean_statement = "\n".join(sql_lines).strip()
+
+        if not clean_statement:
+            continue  # Skip comment-only blocks
+
+        try:
+            cursor.execute(statement)  # Execute original (with comments is fine for SQLite)
+            conn.commit()  # Commit after each statement
+        except sqlite3.OperationalError as e:
+            # Handle "duplicate column" errors gracefully
+            if "duplicate column" in str(e).lower():
+                print(f"    Column already exists, skipping: {e}")
+            # Handle "table already exists" errors gracefully
+            elif "already exists" in str(e).lower():
+                print(f"    Already exists, skipping: {e}")
+            else:
+                raise
 
     # Record migration as applied
     cursor.execute("INSERT INTO _migrations (name) VALUES (?)", (migration_name,))

@@ -61,6 +61,7 @@ class TestCaseResponse(BaseModel):
     priority: str
     tags: List[str]
     steps: List[TestStepResponse]
+    fixture_ids: List[int] = []
 
 
 class BuildResponse(BaseModel):
@@ -144,7 +145,8 @@ async def build(
                     description=step.description,
                 )
                 for step in result.test_case.steps
-            ]
+            ],
+            fixture_ids=result.test_case.fixture_ids,
         ),
         message=result.message,
         needs_clarification=result.needs_clarification,

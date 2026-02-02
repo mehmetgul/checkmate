@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.logging import setup_logging, get_logger, request_id_var
 from db.session import create_db_and_tables
-from api.routes import projects, test_cases, test_runs, agent, settings, config, notifications, schedules
+from api.routes import projects, test_cases, test_runs, agent, settings, config, notifications, schedules, fixtures
 
 # Initialize logging on module load
 setup_logging()
@@ -67,6 +67,8 @@ app.include_router(notifications.router, prefix="/api")
 app.include_router(schedules.router, prefix="/api")
 app.include_router(schedules.project_runs_router, prefix="/api")
 app.include_router(schedules.debug_router, prefix="/api")
+app.include_router(fixtures.router, prefix="/api")
+app.include_router(fixtures.fixture_router, prefix="/api")
 
 
 @app.get("/")

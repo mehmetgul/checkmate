@@ -27,3 +27,13 @@ def encrypt_password(plain: str) -> str:
 def decrypt_password(encrypted: str) -> str:
     """Decrypt an encrypted password."""
     return _get_fernet().decrypt(encrypted.encode()).decode()
+
+
+def encrypt_data(data: str) -> str:
+    """Encrypt arbitrary string data (e.g., JSON)."""
+    return _get_fernet().encrypt(data.encode()).decode()
+
+
+def decrypt_data(encrypted: str) -> str:
+    """Decrypt encrypted string data."""
+    return _get_fernet().decrypt(encrypted.encode()).decode()

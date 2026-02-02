@@ -59,12 +59,13 @@ class TestStep(TypedDict):
     description: str  # Human-readable step description
 
 
-class TestPlan(TypedDict):
+class TestPlan(TypedDict, total=False):
     """A complete test plan generated from natural language."""
     test_case_id: Optional[str]
     natural_query: str
     steps: List[TestStep]
     expected_outcome: str
+    fixture_ids: List[int]
 
 
 class TestResult(TypedDict):
