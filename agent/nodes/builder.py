@@ -127,6 +127,7 @@ WRONG - Never do this:
 9. IMPORTANT: Preserve existing steps when adding new ones (unless user asks to remove/replace)
 10. If specific details are missing and NO matching persona/page exists, use placeholder like {{{{BUTTON_NAME}}}} and set needs_clarification=true
 11. Update the test case name and natural_query to reflect all the steps
+12. CRITICAL: When using fixtures, do NOT include the fixture's steps in your test - start your steps from where the fixture ends (e.g., if login fixture selected, do NOT add login steps, start already logged in)
 
 Based on the current message, update the test case appropriately."""),
     ("human", "{current_message}")
@@ -210,7 +211,10 @@ def build_fixtures_context(project_id: Optional[int]) -> str:
         context_parts.append(f"    Setup: {step_summary}")
 
     context_parts.append("")
-    context_parts.append("IMPORTANT: If a fixture matches your test's setup needs (e.g., login), include its ID in fixture_ids and do NOT generate those setup steps. Start your test from where the fixture ends.")
+    context_parts.append("CRITICAL: When you select a fixture, do NOT duplicate its steps in your test case!")
+    context_parts.append("- If using a login fixture: Do NOT include navigate to login, fill credentials, or click login button in your steps")
+    context_parts.append("- Your test steps should start AFTER the fixture's setup is complete (e.g., already logged in)")
+    context_parts.append("- Example: With login fixture, start directly with navigating to the feature you're testing")
 
     return "\n".join(context_parts)
 
