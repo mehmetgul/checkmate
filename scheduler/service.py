@@ -87,7 +87,7 @@ class SchedulerService:
             )
 
             # Add the job
-            self._scheduler.add_job(
+            job = self._scheduler.add_job(
                 self._execute_schedule,
                 trigger=trigger,
                 id=job_id,
@@ -96,24 +96,37 @@ class SchedulerService:
                 name=f"Schedule: {schedule.name}",
             )
 
-            # Calculate and update next run time
+            # Calculate and update next run time (store as naive UTC)
             tz = pytz.timezone(schedule.timezone)
             now = datetime.now(tz)
             cron = croniter(schedule.cron_expression, now)
-            next_run = cron.get_next(datetime)
+            next_run_local = cron.get_next(datetime)
+            # Convert to UTC (naive) for storage
+            next_run = next_run_local.astimezone(pytz.UTC).replace(tzinfo=None)
 
             with get_session() as session:
                 crud.update_schedule_run_times(session, schedule.id, None, next_run)
 
-            logger.info(f"Added schedule job: {job_id} ({schedule.name}), next run: {next_run}")
+            # Log both APScheduler's calculated time and our stored time for debugging
+            apscheduler_next = job.next_run_time
+            logger.info(
+                f"Added schedule job: {job_id} ({schedule.name}), "
+                f"cron={schedule.cron_expression}, tz={schedule.timezone}, "
+                f"next_run_local={next_run_local}, next_run_utc={next_run}, "
+                f"apscheduler_next={apscheduler_next}"
+            )
 
         except Exception as e:
             logger.error(f"Failed to add schedule job {job_id}: {e}")
 
     async def _execute_schedule(self, schedule_id: int):
         """Execute a scheduled run."""
-        from scheduler.executor import execute_scheduled_run
-        await execute_scheduled_run(schedule_id)
+        logger.info(f"Scheduler triggered execution for schedule_id={schedule_id}")
+        try:
+            from scheduler.executor import execute_scheduled_run
+            await execute_scheduled_run(schedule_id)
+        except Exception as e:
+            logger.error(f"Error executing schedule {schedule_id}: {e}", exc_info=True)
 
     def add_schedule(self, schedule):
         """Add or update a schedule job."""
@@ -148,6 +161,21 @@ class SchedulerService:
         job_id = f"schedule_{schedule_id}"
         job = self._scheduler.get_job(job_id)
         return job.next_run_time if job else None
+
+    def get_all_jobs_status(self) -> list:
+        """Get status of all scheduled jobs for debugging."""
+        if not self._scheduler:
+            return []
+
+        jobs = []
+        for job in self._scheduler.get_jobs():
+            jobs.append({
+                "id": job.id,
+                "name": job.name,
+                "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+                "trigger": str(job.trigger),
+            })
+        return jobs
 
 
 # Global scheduler service instance

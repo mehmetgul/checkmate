@@ -66,6 +66,7 @@ app.include_router(config.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(schedules.router, prefix="/api")
 app.include_router(schedules.project_runs_router, prefix="/api")
+app.include_router(schedules.debug_router, prefix="/api")
 
 
 @app.get("/")

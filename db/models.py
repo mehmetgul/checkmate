@@ -5,7 +5,15 @@ from enum import Enum
 from typing import Optional, List
 from sqlmodel import SQLModel, Field, Relationship
 from sqlalchemy import Column, Integer, ForeignKey
+from pydantic import field_serializer
 import json
+
+
+def serialize_datetime_utc(dt: Optional[datetime]) -> Optional[str]:
+    """Serialize datetime to ISO format with Z suffix (UTC indicator)."""
+    if dt is None:
+        return None
+    return dt.isoformat() + "Z"
 
 
 class Priority(str, Enum):
@@ -434,6 +442,10 @@ class ScheduleRead(ScheduleBase):
     created_at: datetime
     updated_at: datetime
 
+    @field_serializer('last_run_at', 'next_run_at', 'created_at', 'updated_at')
+    def serialize_dt(self, dt: Optional[datetime], _info) -> Optional[str]:
+        return serialize_datetime_utc(dt)
+
 
 class ScheduleUpdate(SQLModel):
     name: Optional[str] = None
@@ -501,3 +513,7 @@ class ScheduledRunRead(ScheduledRunBase):
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     created_at: datetime
+
+    @field_serializer('started_at', 'completed_at', 'created_at')
+    def serialize_dt(self, dt: Optional[datetime], _info) -> Optional[str]:
+        return serialize_datetime_utc(dt)

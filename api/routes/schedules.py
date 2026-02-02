@@ -111,11 +111,13 @@ def create_schedule(
             if ch.project_id != project_id:
                 raise HTTPException(status_code=400, detail=f"Notification channel {ch.id} does not belong to this project")
 
-    # Calculate next run time
+    # Calculate next run time (store as naive UTC for consistency)
     tz = pytz.timezone(request.timezone)
     now = datetime.now(tz)
     cron = croniter(request.cron_expression, now)
-    next_run = cron.get_next(datetime)
+    next_run_local = cron.get_next(datetime)
+    # Convert to UTC (naive) for storage
+    next_run = next_run_local.astimezone(pytz.UTC).replace(tzinfo=None)
 
     schedule = ScheduleCreate(
         project_id=project_id,
@@ -229,7 +231,9 @@ def update_schedule(
         tz = pytz.timezone(updated.timezone)
         now = datetime.now(tz)
         cron = croniter(updated.cron_expression, now)
-        next_run = cron.get_next(datetime)
+        next_run_local = cron.get_next(datetime)
+        # Convert to UTC (naive) for storage
+        next_run = next_run_local.astimezone(pytz.UTC).replace(tzinfo=None)
         crud.update_schedule_run_times(session, schedule_id, None, next_run)
         session.refresh(updated)
 
@@ -342,3 +346,16 @@ def get_project_scheduled_runs(
         ))
 
     return result
+
+
+# Debug endpoint for scheduler diagnostics
+debug_router = APIRouter(prefix="/debug/scheduler", tags=["debug"])
+
+
+@debug_router.get("/status")
+def get_scheduler_status():
+    """Get scheduler status and all scheduled jobs (for debugging)."""
+    return {
+        "is_running": scheduler_service.is_running,
+        "jobs": scheduler_service.get_all_jobs_status(),
+    }

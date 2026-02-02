@@ -66,7 +66,9 @@ async def execute_scheduled_run(schedule_id: int, skip_claim: bool = False):
             now = datetime.utcnow()
             tz = pytz.timezone(schedule.timezone)
             cron = croniter(schedule.cron_expression, datetime.now(tz))
-            next_run = cron.get_next(datetime)
+            next_run_local = cron.get_next(datetime)
+            # Convert to UTC (naive) for storage
+            next_run = next_run_local.astimezone(pytz.UTC).replace(tzinfo=None)
             crud.update_schedule_run_times(session, schedule_id, now, next_run)
             return
 
@@ -208,7 +210,9 @@ async def execute_scheduled_run(schedule_id: int, skip_claim: bool = False):
         now = datetime.utcnow()
         tz = pytz.timezone(schedule.timezone)
         cron = croniter(schedule.cron_expression, datetime.now(tz))
-        next_run = cron.get_next(datetime)
+        next_run_local = cron.get_next(datetime)
+        # Convert to UTC (naive) for storage
+        next_run = next_run_local.astimezone(pytz.UTC).replace(tzinfo=None)
         crud.update_schedule_run_times(session, schedule_id, now, next_run)
 
         logger.info(f"Scheduled run completed: run_id={scheduled_run.id}, passed={pass_count}, failed={fail_count}")
