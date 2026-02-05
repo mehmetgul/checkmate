@@ -23,6 +23,7 @@ Supported actions mapped to Playwright:
 | assert_text   | Verify text visible           | null                      | expected text                      |
 | assert_element| Verify element visible        | element description       | null                               |
 | assert_style  | Verify element CSS style      | element description       | JSON {property, expected}          |
+| assert_url    | Verify URL matches regex      | null                      | regex pattern                      |
 | back          | Navigate back                 | null                      | null                               |
 | evaluate      | Run JavaScript                | null                      | JavaScript code                    |
 | upload        | Upload file                   | file input element        | file path(s)                       |
@@ -49,6 +50,7 @@ class TestStep(TypedDict):
         "assert_text",    # Verify text is visible
         "assert_element", # Verify element is visible
         "assert_style",   # Verify element CSS style
+        "assert_url",     # Verify URL matches regex
         "back",           # Navigate back
         "evaluate",       # Run JavaScript
         "upload",         # Upload file

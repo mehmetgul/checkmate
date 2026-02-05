@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 ActionType = Literal[
     "navigate", "click", "type", "fill_form", "select", "hover",
     "press_key", "wait", "wait_for_page", "screenshot", "assert_text",
-    "assert_element", "assert_style", "back", "evaluate", "upload", "drag"
+    "assert_element", "assert_style", "assert_url", "back", "evaluate", "upload", "drag"
 ]
 
 
@@ -93,6 +93,9 @@ Click example (value MUST be null):
 Type example:
 {{"action": "type", "target": "Email input", "value": "test@example.com", "description": "Enter email"}}
 
+Assert URL example (target MUST be null):
+{{"action": "assert_url", "target": null, "value": ".*dashboard.*", "description": "Verify URL contains 'dashboard'"}}
+
 WRONG - Never do this:
 {{"action": "navigate", "target": "/login", "value": null}}  <-- URL must be in value, not target!
 
@@ -109,7 +112,8 @@ WRONG - Never do this:
 - screenshot: Capture screenshot (target = null, value = optional filename or null)
 - assert_text: Verify text is visible (target = null, value = expected text)
 - assert_element: Verify element exists (target = element description, value = null)
-- assert_style: Verify element CSS style (target = element description, value = JSON like '{{"property": "background-color", "expected": "grey"}}')
+- assert_style: Verify element CSS style (target = element description, value = JSON like '{{{{"property": "background-color", "expected": "grey"}}}}')
+- assert_url: Verify URL matches regex (target = null, value = regex pattern like ".*dashboard.*" to check if URL contains "dashboard")
 - back: Navigate back (target = null, value = null)
 - evaluate: Run JavaScript (target = null, value = JS code)
 - upload: Upload file (target = file input element, value = file path)
@@ -121,7 +125,8 @@ WRONG - Never do this:
 3. Use wait_for_page after clicks that trigger page navigation or redirects (use the project's default page load event from Project Settings above)
 4. Use wait for element/text to appear after dynamic content loads
 5. Use assert_text or assert_element to verify success
-6. End with a screenshot to capture final state
+6. Use assert_url to verify navigation to correct page or URL pattern. When user asks to "check if URL contains X", use pattern ".*X.*" (not the full URL). Examples: ".*dashboard.*", ".*login.*", ".*exampl.*"
+7. End with a screenshot to capture final state
 7. IMPORTANT: When personas are available and user mentions a persona name (like "admin", "client"), use the template variables like {{{{admin.username}}}} and {{{{admin.password}}}} - do NOT make up fake credentials
 8. IMPORTANT: When pages are available and user mentions a page name, use the template variable like {{{{login}}}} for navigation
 9. IMPORTANT: Preserve existing steps when adding new ones (unless user asks to remove/replace)

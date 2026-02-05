@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 ActionType = Literal[
     "navigate", "click", "type", "fill_form", "select", "hover",
     "press_key", "wait", "wait_for_page", "screenshot", "assert_text",
-    "assert_element", "assert_style", "back", "evaluate", "upload", "drag"
+    "assert_element", "assert_style", "assert_url", "back", "evaluate", "upload", "drag"
 ]
 
 # Keep list for runtime validation if needed
@@ -83,6 +83,9 @@ Click example (value MUST be null):
 Type example:
 {{"action": "type", "target": "Email input", "value": "test@example.com", "description": "Enter email"}}
 
+Assert URL example (target MUST be null):
+{{"action": "assert_url", "target": null, "value": ".*dashboard.*", "description": "Verify URL contains dashboard"}}
+
 WRONG - Never do this:
 {{"action": "navigate", "target": "/login", "value": null}}  <-- URL must be in value, not target!
 
@@ -99,7 +102,8 @@ Available actions (mapped to Playwright):
 - screenshot: Capture screenshot (target = null, value = optional filename or null)
 - assert_text: Verify text is visible (target = null, value = expected text)
 - assert_element: Verify element exists (target = element description, value = null)
-- assert_style: Verify element CSS style (target = element description, value = JSON like '{{"property": "background-color", "expected": "grey"}}')
+- assert_style: Verify element CSS style (target = element description, value = JSON like '{{{{"property": "background-color", "expected": "grey"}}}}')
+- assert_url: Verify URL matches regex (target = null, value = regex pattern like ".*dashboard.*" to check if URL contains "dashboard")
 - back: Navigate back (target = null, value = null)
 - evaluate: Run JavaScript (target = null, value = JS code)
 - upload: Upload file (target = file input element, value = file path)
@@ -111,13 +115,14 @@ Guidelines:
 3. Use wait_for_page after clicks that trigger page navigation or redirects (use the project's default page load event from Project Settings above)
 4. Use wait for element/text to appear after dynamic content loads
 5. Use assert_text or assert_element to verify success
-6. End with a screenshot to capture final state
-7. IMPORTANT: When personas are available and user mentions logging in "as admin" or similar, use the persona template variables like {{{{admin.username}}}} and {{{{admin.password}}}} in fill_form or type actions
-8. IMPORTANT: When pages are available and user mentions a page name (like "login page"), use the page template variable like {{{{login}}}} for the navigate action value
-9. IMPORTANT: If this is a follow-up request, MERGE with the previous plan - keep existing steps and add/modify as needed
-10. For style checks (colors, sizes), use assert_style with the CSS property and expected value
-11. If specific details are missing and NO matching persona/page exists, use placeholder like {{BUTTON_NAME}} and set needs_clarification=true
-12. FIXTURES: If your test needs login/auth, use the login fixture (add ID to fixture_ids) and start your steps AFTER login (don't write login steps yourself)"""),
+6. Use assert_url to verify navigation to correct page or URL pattern. When user asks to "check if URL contains X", use pattern ".*X.*" (not the full URL). Examples: ".*dashboard.*", ".*login.*", ".*exampl.*"
+7. End with a screenshot to capture final state
+8. IMPORTANT: When personas are available and user mentions logging in "as admin" or similar, use the persona template variables like {{{{admin.username}}}} and {{{{admin.password}}}} in fill_form or type actions
+9. IMPORTANT: When pages are available and user mentions a page name (like "login page"), use the page template variable like {{{{login}}}} for the navigate action value
+10. IMPORTANT: If this is a follow-up request, MERGE with the previous plan - keep existing steps and add/modify as needed
+11. For style checks (colors, sizes), use assert_style with the CSS property and expected value
+12. If specific details are missing and NO matching persona/page exists, use placeholder like {{BUTTON_NAME}} and set needs_clarification=true
+13. FIXTURES: If your test needs login/auth, use the login fixture (add ID to fixture_ids) and start your steps AFTER login (don't write login steps yourself)"""),
     ("human", "{query}")
 ])
 
