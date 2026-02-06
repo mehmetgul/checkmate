@@ -352,6 +352,108 @@ def _get_fixture_steps_by_ids(
     return resolved_steps, display_steps
 
 
+def _get_fixture_steps_by_ids(
+    session,
+    fixture_ids: List[int],
+    project_id: int,
+    browser: Optional[str] = None,
+) -> tuple[List[dict], List[dict], bool]:
+    """Get resolved fixture steps to prepend to test steps.
+    
+    Checks for valid cached state first. If cache hit, returns restore_state step.
+    If cache miss, returns full fixture steps with capture_state step appended.
+
+    Args:
+        session: Database session
+        fixture_ids: List of fixture IDs
+        project_id: Project ID for resolving references
+        browser: Browser type for cache lookup (e.g., 'chromium-headless')
+
+    Returns:
+        Tuple of (resolved_steps, display_steps, is_cached)
+        - resolved_steps: Steps to execute (restore_state OR full fixture steps + capture_state)
+        - display_steps: Steps to display in UI (with passwords masked)
+        - is_cached: True if using cached state, False if running fresh fixture
+    """
+    if not fixture_ids:
+        return [], [], False
+
+    # Get fixtures
+    fixtures = crud.get_fixtures_by_ids(session, fixture_ids)
+    if not fixtures:
+        logger.warning(f"No fixtures found for IDs: {fixture_ids}")
+        return [], [], False
+
+    # Check if any fixture has cached scope and valid state
+    for fixture in fixtures:
+        if fixture.scope == "cached":
+            # Check for valid cached state
+            cached_state = crud.get_valid_fixture_state(session, fixture.id, browser)
+            if cached_state:
+                # Cache HIT - return restore_state step
+                logger.info(f"Using cached state for fixture '{fixture.name}' (ID: {fixture.id})")
+                decrypted = crud.get_decrypted_fixture_state(session, cached_state)
+                
+                import json
+                restore_step = {
+                    "action": "restore_state",
+                    "target": decrypted.get("url"),
+                    "value": json.dumps(decrypted),
+                    "description": f"Restore cached state from fixture: {fixture.name}",
+                    "fixture_name": fixture.name,
+                    "is_cached": True,
+                }
+                
+                # Create display step with masked value for UI
+                display_step = {
+                    "action": "restore_state",
+                    "target": decrypted.get("url"),
+                    "value": "[cached browser state]",
+                    "description": f"Restore cached state from fixture: {fixture.name}",
+                    "fixture_name": fixture.name,
+                    "is_cached": True,
+                }
+                
+                return [restore_step], [display_step], True
+
+    # Cache MISS - get full fixture steps and add capture_state
+    logger.info(f"No valid cache for fixtures {fixture_ids}, running fresh setup")
+    
+    all_fixture_steps = []
+    fixture_names = []
+
+    for fixture in fixtures:
+        steps = fixture.get_setup_steps()
+        if steps:
+            # Add fixture_name to each step for tracking
+            for step in steps:
+                step["fixture_name"] = fixture.name
+            all_fixture_steps.extend(steps)
+            fixture_names.append(fixture.name)
+
+    if not all_fixture_steps:
+        return [], [], False
+
+    # Add capture_state step at the end for cached fixtures
+    has_cached_fixture = any(f.scope == "cached" for f in fixtures)
+    if has_cached_fixture:
+        capture_step = {
+            "action": "capture_state",
+            "description": "Capture browser state for fixture caching",
+            "fixture_name": fixture_names[0],  # Associate with first fixture
+            "_internal": True,  # Mark as internal step (hidden in UI)
+        }
+        all_fixture_steps.append(capture_step)
+
+    logger.info(f"Prepending {len(all_fixture_steps)} fixture steps from: {', '.join(fixture_names)}")
+
+    # Resolve references in fixture steps
+    resolved_steps = resolve_references(session, project_id, all_fixture_steps)
+    display_steps = mask_passwords_in_steps(resolved_steps)
+
+    return resolved_steps, display_steps, False
+
+
 async def execute_steps_stream(
     project_id: int,
     steps: List[ExecuteStepRequest],
@@ -386,14 +488,15 @@ async def execute_steps_stream(
             display_steps = mask_passwords_in_steps(resolved_steps)
 
             # Prepend fixture steps if fixture_ids provided
+            fixtures_cached = False
             if fixture_ids:
-                fixture_resolved, fixture_display = _get_fixture_steps_by_ids(
-                    session, fixture_ids, project_id
+                fixture_resolved, fixture_display, fixtures_cached = _get_fixture_steps_by_ids(
+                    session, fixture_ids, project_id, browser
                 )
                 if fixture_resolved:
                     resolved_steps = fixture_resolved + resolved_steps
                     display_steps = fixture_display + display_steps
-                    logger.info(f"Total steps after fixture prepend: {len(resolved_steps)}")
+                    logger.info(f"Total steps after fixture prepend: {len(resolved_steps)} (cached: {fixtures_cached})")
 
             # Create test run
             test_run = crud.create_test_run(session, TestRunCreate(
@@ -478,13 +581,48 @@ async def execute_steps_stream(
                         # Get step data for this step (use display_steps for masked values)
                         step_idx = step_number - 1
                         display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
+                        action = display_step.get("action", "unknown")
+
+                        # Handle capture_state action - persist browser state for fixture caching
+                        if action == "capture_state" and status == "passed" and fixture_ids:
+                            result = event.get("result", {})
+                            if result and isinstance(result, dict):
+                                captured_url = result.get("url")
+                                captured_state = result.get("state")
+                                
+                                if captured_url and captured_state:
+                                    from datetime import timedelta
+                                    
+                                    # Save state for all cached fixtures
+                                    fixtures = crud.get_fixtures_by_ids(session, fixture_ids)
+                                    for fixture in fixtures:
+                                        if fixture.scope == "cached":
+                                            expires_at = datetime.utcnow() + timedelta(seconds=fixture.cache_ttl_seconds)
+                                            
+                                            try:
+                                                # Delete any existing state for this fixture
+                                                crud.delete_fixture_states_by_fixture(session, fixture.id)
+                                                
+                                                # Create new cached state
+                                                crud.create_fixture_state(
+                                                    session=session,
+                                                    fixture_id=fixture.id,
+                                                    project_id=project_id,
+                                                    url=captured_url,
+                                                    state_json=json.dumps(captured_state),
+                                                    browser=browser,
+                                                    expires_at=expires_at,
+                                                )
+                                                logger.info(f"Cached state for fixture '{fixture.name}' (expires: {expires_at})")
+                                            except Exception as e:
+                                                logger.error(f"Failed to cache state for fixture '{fixture.name}': {e}")
 
                         # Create step record in DB with masked values
                         crud.create_test_run_step(session, TestRunStepCreate(
                             test_run_id=test_run.id,
                             test_case_id=None,
                             step_number=step_number,
-                            action=display_step.get("action", "unknown"),
+                            action=action,
                             target=display_step.get("target"),
                             value=display_step.get("value"),  # Masked value
                             status=step_status,

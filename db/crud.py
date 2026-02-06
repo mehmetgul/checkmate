@@ -99,6 +99,20 @@ def delete_project(session: Session, project_id: int) -> bool:
     for page in pages:
         session.delete(page)
 
+    # Delete related fixtures
+    fixtures = session.exec(
+        select(Fixture).where(Fixture.project_id == project_id)
+    ).all()
+    for fixture in fixtures:
+        session.delete(fixture)
+
+    # Delete related schedules
+    schedules = session.exec(
+        select(Schedule).where(Schedule.project_id == project_id)
+    ).all()
+    for schedule in schedules:
+        session.delete(schedule)
+
     # Delete the project
     session.delete(db_project)
     session.commit()
@@ -447,19 +461,27 @@ def create_fixture_state(
     session: Session,
     fixture_id: int,
     project_id: int,
-    cookies: Optional[str] = None,
-    local_storage: Optional[str] = None,
-    session_storage: Optional[str] = None,
+    url: Optional[str] = None,
+    state_json: Optional[str] = None,
     browser: Optional[str] = None,
     expires_at: Optional[datetime] = None
 ) -> FixtureState:
-    """Create a new fixture state with encrypted data."""
+    """Create a new fixture state with encrypted data.
+    
+    Args:
+        session: Database session
+        fixture_id: Fixture ID
+        project_id: Project ID
+        url: URL where state was captured
+        state_json: JSON string of Playwright storage_state (cookies + origins)
+        browser: Browser type (e.g., 'chromium-headless')
+        expires_at: Expiration timestamp
+    """
     db_state = FixtureState(
         fixture_id=fixture_id,
         project_id=project_id,
-        encrypted_cookies=encrypt_data(cookies) if cookies else None,
-        encrypted_local_storage=encrypt_data(local_storage) if local_storage else None,
-        encrypted_session_storage=encrypt_data(session_storage) if session_storage else None,
+        url=url,
+        encrypted_state_json=encrypt_data(state_json) if state_json else None,
         browser=browser,
         expires_at=expires_at,
     )
@@ -512,14 +534,18 @@ def get_decrypted_fixture_state(session: Session, state: FixtureState) -> dict:
         state: FixtureState to decrypt
 
     Returns:
-        dict with decrypted cookies, local_storage, session_storage
+        dict with url, state (Playwright storage_state), and browser
     """
     import json
 
+    state_data = None
+    if state.encrypted_state_json:
+        decrypted = decrypt_data(state.encrypted_state_json)
+        state_data = json.loads(decrypted) if decrypted else None
+
     return {
-        "cookies": json.loads(decrypt_data(state.encrypted_cookies)) if state.encrypted_cookies else None,
-        "local_storage": json.loads(decrypt_data(state.encrypted_local_storage)) if state.encrypted_local_storage else None,
-        "session_storage": json.loads(decrypt_data(state.encrypted_session_storage)) if state.encrypted_session_storage else None,
+        "url": state.url,
+        "state": state_data,
         "browser": state.browser,
     }
 

@@ -382,9 +382,8 @@ class FixtureUpdate(SQLModel):
 # --- FixtureState (cached browser state) ---
 
 class FixtureStateBase(SQLModel):
-    encrypted_cookies: Optional[str] = None
-    encrypted_local_storage: Optional[str] = None
-    encrypted_session_storage: Optional[str] = None
+    url: Optional[str] = None  # URL where state was captured
+    encrypted_state_json: Optional[str] = None  # Encrypted Playwright storage_state (cookies + origins)
     browser: Optional[str] = None
 
 
