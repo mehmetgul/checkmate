@@ -134,7 +134,7 @@ def create_fixture(
     return db_fixture
 
 
-@router.post("/generate", response_model=FixtureRead)
+@router.post("/generate")
 async def generate_fixture(
     project_id: int,
     request: FixtureGenerateRequest,
@@ -143,6 +143,7 @@ async def generate_fixture(
     """Generate fixture steps from natural language description.
 
     Uses the existing LangGraph agent to convert NLP to steps.
+    Returns the generated fixture data without saving it.
     """
     project = crud.get_project(session, project_id)
     if not project:
@@ -180,20 +181,16 @@ async def generate_fixture(
         # Generate name if not provided
         name = request.name or "Generated Fixture"
 
-        # Create the fixture
-        fixture = FixtureCreate(
-            project_id=project_id,
-            name=name,
-            description=request.prompt,
-            setup_steps=json.dumps(steps),
-            scope="cached",
-            cache_ttl_seconds=3600,
-        )
+        # Return the fixture data without saving
+        logger.info(f"Generated fixture preview: name={name}, steps={len(steps)}")
 
-        db_fixture = crud.create_fixture(session, fixture)
-        logger.info(f"Generated fixture: id={db_fixture.id}, name={db_fixture.name}, steps={len(steps)}")
-
-        return db_fixture
+        return {
+            "name": name,
+            "description": request.prompt,
+            "setup_steps": steps,
+            "scope": "cached",
+            "cache_ttl_seconds": 3600,
+        }
 
     except Exception as e:
         logger.error(f"Failed to generate fixture: {e}")
