@@ -366,7 +366,7 @@ async def preview_fixture(
             if execution_status == "passed" and fixture.scope == "cached" and captured_state:
                 try:
                     from datetime import timedelta
-                    from core.encryption import encrypt_data
+                    from db.encryption import encrypt_data
                     from db.session import get_session
                     
                     # Use a new session for database operations
