@@ -16,6 +16,7 @@ from db.models import (
     FixtureRead,
     FixtureUpdate,
     FixtureState,
+    FixtureStateCreate,
     FixtureStateRead,
     FixtureScope,
 )
