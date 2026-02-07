@@ -367,14 +367,10 @@ async def preview_fixture(
             if execution_status == "passed" and fixture.scope == "cached" and captured_state:
                 try:
                     from datetime import timedelta
-                    from db.encryption import encrypt_data
                     from db.session import get_session
                     
                     # Use a new session for database operations
                     with get_session() as db:
-                        # Encrypt the state
-                        encrypted_state = encrypt_data(json.dumps(captured_state))
-                        
                         # Calculate expiration
                         expires_at = datetime.utcnow() + timedelta(seconds=fixture.cache_ttl_seconds)
                         
@@ -389,15 +385,15 @@ async def preview_fixture(
                             db.delete(old_state)
                         
                         # Save new state
-                        state_create = FixtureStateCreate(
+                        crud.create_fixture_state(
+                            db,
                             fixture_id=fixture.id,
                             project_id=fixture.project_id,
                             url=final_url,
-                            encrypted_state_json=encrypted_state,
+                            state_json=json.dumps(captured_state),
                             browser=browser,
                             expires_at=expires_at,
                         )
-                        crud.create_fixture_state(db, state_create)
                         db.commit()
                         logger.info(f"Saved state for fixture {fixture.id} (browser={browser}, expires={expires_at})")
                 except Exception as e:
