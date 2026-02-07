@@ -364,29 +364,33 @@ async def preview_fixture(
                 try:
                     from datetime import timedelta
                     from core.encryption import encrypt_data
+                    from db.session import get_session
                     
-                    # Encrypt the state
-                    encrypted_state = encrypt_data(json.dumps(captured_state))
-                    
-                    # Calculate expiration
-                    expires_at = datetime.utcnow() + timedelta(seconds=fixture.cache_ttl_seconds)
-                    
-                    # Delete old states for this fixture/browser combo
-                    crud.delete_fixture_states_by_fixture(session, fixture.id, browser)
-                    
-                    # Save new state
-                    state_create = FixtureStateCreate(
-                        fixture_id=fixture.id,
-                        project_id=fixture.project_id,
-                        url=final_url,
-                        encrypted_state_json=encrypted_state,
-                        browser=browser,
-                        expires_at=expires_at,
-                    )
-                    crud.create_fixture_state(session, state_create)
-                    logger.info(f"Saved state for fixture {fixture.id} (browser={browser}, expires={expires_at})")
+                    # Use a new session for database operations
+                    with get_session() as db:
+                        # Encrypt the state
+                        encrypted_state = encrypt_data(json.dumps(captured_state))
+                        
+                        # Calculate expiration
+                        expires_at = datetime.utcnow() + timedelta(seconds=fixture.cache_ttl_seconds)
+                        
+                        # Delete old states for this fixture/browser combo
+                        crud.delete_fixture_states_by_fixture(db, fixture.id, browser)
+                        
+                        # Save new state
+                        state_create = FixtureStateCreate(
+                            fixture_id=fixture.id,
+                            project_id=fixture.project_id,
+                            url=final_url,
+                            encrypted_state_json=encrypted_state,
+                            browser=browser,
+                            expires_at=expires_at,
+                        )
+                        crud.create_fixture_state(db, state_create)
+                        db.commit()
+                        logger.info(f"Saved state for fixture {fixture.id} (browser={browser}, expires={expires_at})")
                 except Exception as e:
-                    logger.error(f"Failed to save fixture state: {e}")
+                    logger.error(f"Failed to save fixture state: {e}", exc_info=True)
                     # Don't fail the whole preview, just log the error
                     
         finally:
