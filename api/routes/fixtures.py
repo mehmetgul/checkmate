@@ -350,9 +350,11 @@ async def preview_fixture(
                 # Capture state from capture_state step
                 if event.get("type") == "step_completed":
                     if event.get("action") == "capture_state" and event.get("status") == "passed":
-                        captured_state = event.get("result")
-                        final_url = event.get("url")
-                        logger.info(f"Captured state for fixture {fixture.id}, url={final_url}")
+                        result = event.get("result")
+                        if result:
+                            captured_state = result.get("state")
+                            final_url = result.get("url")
+                            logger.info(f"Captured state for fixture {fixture.id}, url={final_url}")
                 
                 # Track execution status
                 if event.get("type") == "completed":
