@@ -364,10 +364,10 @@ async def preview_fixture(
                 try:
                     from datetime import timedelta
                     from core.encryption import encrypt_data
-                    from db.session import get_session
+                    from db.database import get_session
                     
                     # Use a new session for database operations
-                    with get_session() as db:
+                    with next(get_session()) as db:
                         # Encrypt the state
                         encrypted_state = encrypt_data(json.dumps(captured_state))
                         
