@@ -359,6 +359,9 @@ async def preview_fixture(
 
                 yield f"data: {json.dumps(event)}\n\n"
             
+            # Debug logging
+            logger.info(f"Post-execution: status={execution_status}, scope={fixture.scope}, has_state={captured_state is not None}")
+            
             # Save state if execution succeeded and scope is cached
             if execution_status == "passed" and fixture.scope == "cached" and captured_state:
                 try:
