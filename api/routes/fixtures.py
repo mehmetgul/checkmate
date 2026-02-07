@@ -289,8 +289,7 @@ async def preview_fixture(
 ):
     """Execute fixture setup steps and return results as SSE stream.
 
-    This is a preview/test endpoint - it does NOT cache the resulting state.
-    Use this to verify fixture setup works correctly before using in tests.
+    If execution succeeds and fixture scope is 'cached', automatically saves the browser state.
     """
     fixture = crud.get_fixture(session, fixture_id)
     if not fixture:
@@ -306,6 +305,10 @@ async def preview_fixture(
     async def generate():
         """Stream fixture execution events."""
         client = PlaywrightExecutorClient()
+        captured_state = None
+        execution_status = None
+        final_url = None
+        
         try:
             steps = fixture.get_setup_steps()
 
@@ -313,6 +316,21 @@ async def preview_fixture(
             from api.routes.test_cases import resolve_references, mask_passwords_in_steps
             resolved_steps = resolve_references(session, project.id, steps)
             display_steps = mask_passwords_in_steps(resolved_steps)
+
+            # For cached fixtures, append capture_state step
+            if fixture.scope == "cached":
+                resolved_steps.append({
+                    "action": "capture_state",
+                    "target": None,
+                    "value": None,
+                    "description": "Capture browser state for caching",
+                })
+                display_steps.append({
+                    "action": "capture_state",
+                    "target": None,
+                    "value": None,
+                    "description": "Capture browser state for caching",
+                })
 
             async for event in client.execute_stream(
                 base_url=project.base_url,
@@ -328,7 +346,49 @@ async def preview_fixture(
                         event["target"] = display_step.get("target")
                         event["value"] = display_step.get("value")
 
+                # Capture state from capture_state step
+                if event.get("type") == "step_completed":
+                    if event.get("action") == "capture_state" and event.get("status") == "passed":
+                        captured_state = event.get("result")
+                        final_url = event.get("url")
+                        logger.info(f"Captured state for fixture {fixture.id}, url={final_url}")
+                
+                # Track execution status
+                if event.get("type") == "completed":
+                    execution_status = event.get("status")
+
                 yield f"data: {json.dumps(event)}\n\n"
+            
+            # Save state if execution succeeded and scope is cached
+            if execution_status == "passed" and fixture.scope == "cached" and captured_state:
+                try:
+                    from datetime import timedelta
+                    from core.encryption import encrypt_data
+                    
+                    # Encrypt the state
+                    encrypted_state = encrypt_data(json.dumps(captured_state))
+                    
+                    # Calculate expiration
+                    expires_at = datetime.utcnow() + timedelta(seconds=fixture.cache_ttl_seconds)
+                    
+                    # Delete old states for this fixture/browser combo
+                    crud.delete_fixture_states_by_fixture(session, fixture.id, browser)
+                    
+                    # Save new state
+                    state_create = FixtureStateCreate(
+                        fixture_id=fixture.id,
+                        project_id=fixture.project_id,
+                        url=final_url,
+                        encrypted_state_json=encrypted_state,
+                        browser=browser,
+                        expires_at=expires_at,
+                    )
+                    crud.create_fixture_state(session, state_create)
+                    logger.info(f"Saved state for fixture {fixture.id} (browser={browser}, expires={expires_at})")
+                except Exception as e:
+                    logger.error(f"Failed to save fixture state: {e}")
+                    # Don't fail the whole preview, just log the error
+                    
         finally:
             await client.close()
 
