@@ -378,7 +378,14 @@ async def preview_fixture(
                         expires_at = datetime.utcnow() + timedelta(seconds=fixture.cache_ttl_seconds)
                         
                         # Delete old states for this fixture/browser combo
-                        crud.delete_fixture_states_by_fixture(db, fixture.id, browser)
+                        from sqlmodel import select
+                        old_states = db.exec(
+                            select(FixtureState)
+                            .where(FixtureState.fixture_id == fixture.id)
+                            .where(FixtureState.browser == browser)
+                        ).all()
+                        for old_state in old_states:
+                            db.delete(old_state)
                         
                         # Save new state
                         state_create = FixtureStateCreate(
