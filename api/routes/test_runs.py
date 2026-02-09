@@ -481,6 +481,10 @@ async def execute_steps_stream(
             if use_simulation:
                 yield sse_warning("Playwright executor unavailable, using simulation mode")
 
+            # Default browser to chromium-headless if not specified
+            if not browser:
+                browser = "chromium-headless"
+
             # Resolve persona/page references in steps
             steps_as_dicts = [step.model_dump() for step in steps]
             resolved_steps = resolve_references(session, project_id, steps_as_dicts)
