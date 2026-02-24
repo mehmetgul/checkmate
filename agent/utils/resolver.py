@@ -1,12 +1,13 @@
-"""Reference resolution for personas and pages in test steps."""
+"""Reference resolution for personas, pages, and test data in test steps."""
 
+import json
 import logging
 import re
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 from sqlmodel import Session
 
 from db import crud
-from db.encryption import decrypt_password
+from db.encryption import decrypt_password, decrypt_data
 
 logger = logging.getLogger(__name__)
 
@@ -53,59 +54,117 @@ def mask_passwords_in_steps(
 def resolve_references(
     session: Session,
     project_id: int,
-    steps: List[Dict[str, Any]]
+    steps: List[Dict[str, Any]],
+    env_vars: Optional[Dict[str, str]] = None,
+    override_base_url: Optional[str] = None,
+    environment_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Resolve {{persona.field}} and {{page}} references in test steps.
-    Also resolves relative URLs to absolute using project's base_url.
+    Resolve {{persona.field}}, {{page}}, {{env.VAR}}, and {{data.*}} references in test steps.
+    Also resolves relative URLs to absolute using base_url (env override takes priority).
 
     Supported patterns:
-    - {{persona_name.username}} - resolves to the persona's username
-    - {{persona_name.password}} - resolves to the decrypted password
-    - {{page_name}} - resolves to the page's path
+    - {{env.VAR_NAME}}           - resolves from active environment variables
+    - {{persona_name.username}}  - resolves to the persona's username
+    - {{persona_name.password}}  - resolves to the decrypted password
+    - {{page_name}}              - resolves to the page's path
+    - {{data.dataset.field}}     - resolves from test data
 
     Args:
         session: Database session
         project_id: Project ID to fetch personas/pages from
         steps: List of step dictionaries
+        env_vars: Optional dict of environment variables to inject ({{env.KEY}})
+        override_base_url: Optional base_url from active environment (overrides project base_url)
 
     Returns:
         List of steps with all references resolved
     """
-    # Load project for base_url
+    # Load project for base_url; env override takes priority
     project = crud.get_project(session, project_id)
-    base_url = (project.base_url or "").rstrip("/") if project else ""
+    base_url = (override_base_url or (project.base_url if project else "") or "").rstrip("/")
+    _env_vars = env_vars or {}
 
-    # Load personas and pages for this project
-    personas = {p.name: p for p in crud.get_personas_by_project(session, project_id)}
+    # Load personas and test data — env-scoped items override globals with the same name
     pages = {p.name: p for p in crud.get_pages_by_project(session, project_id)}
 
-    # Pattern matches {{word}} or {{word.word}}
-    pattern = r"\{\{(\w+(?:\.\w+)?)\}\}"
+    if environment_id is not None:
+        all_personas = crud.get_personas_by_project(session, project_id, environment_id)
+        personas: Dict[str, Any] = {p.name: p for p in all_personas if p.environment_id is None}
+        personas.update({p.name: p for p in all_personas if p.environment_id == environment_id})
+        all_td = crud.get_test_data_by_project(session, project_id, environment_id)
+        test_data_items: Dict[str, Any] = {td.name: td for td in all_td if td.environment_id is None}
+        test_data_items.update({td.name: td for td in all_td if td.environment_id == environment_id})
+    else:
+        personas = {p.name: p for p in crud.get_personas_by_project(session, project_id)}
+        test_data_items = {td.name: td for td in crud.get_test_data_by_project(session, project_id)}
+
+    # Pattern matches {{word}}, {{word.word}}, or {{word.word.word}}
+    pattern = r"\{\{(\w+(?:\.\w+(?:\.\w+)?)?)\}\}"
 
     def replace(match: re.Match) -> str:
         ref = match.group(1)
+        parts = ref.split(".")
 
-        if "." in ref:
-            # Persona reference: {{name.field}}
-            name, field = ref.split(".", 1)
+        if len(parts) == 3:
+            # 3-part: {{data.dataset_name.field}} for test data
+            prefix, dataset_name, field = parts
+            if prefix == "data" and dataset_name in test_data_items:
+                try:
+                    parsed = json.loads(test_data_items[dataset_name].data)
+                    if isinstance(parsed, dict) and field in parsed:
+                        return str(parsed[field])
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"Failed to parse test data '{dataset_name}': {e}")
+            return match.group(0)
+
+        elif len(parts) == 2:
+            # 2-part: {{env.VAR}} for environment variables
+            name, field = parts
+            if name == "env":
+                return str(_env_vars.get(field, match.group(0)))
+
+            # 2-part: {{name.field}} for persona/credential
             if name in personas:
+                persona = personas[name]
                 if field == "username":
-                    return personas[name].username
+                    return persona.username or ""
                 elif field == "password":
                     try:
-                        decrypted = decrypt_password(personas[name].encrypted_password)
-                        return decrypted
+                        if persona.encrypted_password:
+                            return decrypt_password(persona.encrypted_password)
                     except Exception as e:
-                        logger.warning(f"Failed to decrypt password for persona '{name}': {e}")
-                        return match.group(0)
-            # Unknown persona or field - return original
+                        logger.warning(f"Failed to decrypt password for '{name}': {e}")
+                    return match.group(0)
+                elif field == "api_key":
+                    try:
+                        if persona.encrypted_api_key:
+                            return decrypt_data(persona.encrypted_api_key)
+                    except Exception as e:
+                        logger.warning(f"Failed to decrypt api_key for '{name}': {e}")
+                    return match.group(0)
+                elif field == "token":
+                    try:
+                        if persona.encrypted_token:
+                            return decrypt_data(persona.encrypted_token)
+                    except Exception as e:
+                        logger.warning(f"Failed to decrypt token for '{name}': {e}")
+                    return match.group(0)
+                else:
+                    # Try custom metadata field
+                    try:
+                        if persona.encrypted_metadata:
+                            metadata = json.loads(decrypt_data(persona.encrypted_metadata))
+                            if isinstance(metadata, dict) and field in metadata:
+                                return str(metadata[field])
+                    except Exception as e:
+                        logger.warning(f"Failed to decrypt metadata for '{name}': {e}")
             return match.group(0)
+
         else:
-            # Page reference: {{name}}
+            # 1-part: {{name}} for page reference
             if ref in pages:
                 return pages[ref].path
-            # Unknown page - return original
             return match.group(0)
 
     def resolve_value(value: Any) -> Any:
