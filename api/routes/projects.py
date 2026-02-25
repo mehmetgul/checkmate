@@ -36,6 +36,18 @@ def create_project(
     return crud.create_project(session, project)
 
 
+@router.get("/{project_id}/dashboard")
+def get_project_dashboard_stats(
+    project_id: int,
+    session: Session = Depends(get_session_dep)
+):
+    """Get rich dashboard stats for a single project."""
+    project = crud.get_project(session, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return crud.get_project_dashboard(session, project_id)
+
+
 @router.get("/{project_id}", response_model=ProjectRead)
 def get_project(
     project_id: int,

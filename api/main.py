@@ -47,7 +47,8 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
-# CORS middleware
+# CORS middleware — must be outermost so it adds headers to all responses
+# including SSE streams and error responses.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001"],
@@ -92,7 +93,6 @@ def health_check():
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log all HTTP requests with request ID for correlation."""
-    # Generate and set request ID for entire request flow
     request_id = str(uuid.uuid4())
     request_id_var.set(request_id)
 
@@ -104,7 +104,6 @@ async def log_requests(request: Request, call_next):
     duration_ms = (time.perf_counter() - start) * 1000
     logger.info(f"{response.status_code} ({duration_ms:.1f}ms)")
 
-    # Return request ID in response header for client debugging
     response.headers["X-Request-ID"] = request_id
 
     return response
