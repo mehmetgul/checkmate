@@ -16,6 +16,13 @@ def serialize_datetime_utc(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() + "Z"
 
 
+class CredentialType(str, Enum):
+    LOGIN = "login"       # username + password (existing behavior)
+    API_KEY = "api_key"   # API key
+    TOKEN = "token"       # bearer token / JWT
+    CUSTOM = "custom"     # flexible key-value pairs
+
+
 class Priority(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
@@ -24,8 +31,12 @@ class Priority(str, Enum):
 
 
 class TestCaseStatus(str, Enum):
-    ACTIVE = "active"
     DRAFT = "draft"
+    ACTIVE = "active"
+    READY = "ready"
+    IN_REVIEW = "in_review"
+    APPROVED = "approved"
+    SKIPPED = "skipped"
     ARCHIVED = "archived"
 
 
@@ -68,10 +79,12 @@ class ProjectBase(SQLModel):
     config: Optional[str] = None  # JSON string for extra config
     base_prompt: Optional[str] = None  # Custom context about app setup, auth flow, etc.
     page_load_state: Optional[str] = Field(default="load")  # Default page load event: load, domcontentloaded, networkidle
+    test_case_prefix: Optional[str] = None  # e.g., "CHKMT", auto-generated from name
 
 
 class Project(ProjectBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    next_test_case_number: int = Field(default=1)  # Auto-increment counter for test case numbering
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -80,6 +93,8 @@ class Project(ProjectBase, table=True):
     personas: List["Persona"] = Relationship(back_populates="project")
     pages: List["Page"] = Relationship(back_populates="project")
     fixtures: List["Fixture"] = Relationship(back_populates="project")
+    test_data_items: List["TestData"] = Relationship(back_populates="project")
+    environments: List["Environment"] = Relationship(back_populates="project")
 
     def get_config(self) -> dict:
         """Parse config JSON."""
@@ -96,8 +111,68 @@ class ProjectCreate(ProjectBase):
 
 class ProjectRead(ProjectBase):
     id: int
+    next_test_case_number: int = 1
     created_at: datetime
     updated_at: datetime
+
+
+# --- TestFolder ---
+
+class FolderType(str, Enum):
+    REGULAR = "regular"
+    SMART = "smart"
+
+
+class TestFolderBase(SQLModel):
+    name: str = Field(index=True)
+    description: Optional[str] = None
+    folder_type: str = Field(default="regular")  # "regular" or "smart"
+    smart_criteria: Optional[str] = None  # JSON: {"tags": [...], "statuses": [...]}
+    order_index: int = Field(default=0)
+
+
+class TestFolder(TestFolderBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    parent_id: Optional[int] = Field(default=None, foreign_key="testfolder.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    test_cases: List["TestCase"] = Relationship(back_populates="folder")
+
+    def get_smart_criteria(self) -> dict:
+        """Parse smart_criteria JSON."""
+        return json.loads(self.smart_criteria) if self.smart_criteria else {}
+
+    def set_smart_criteria(self, criteria: dict):
+        """Set smart_criteria as JSON."""
+        self.smart_criteria = json.dumps(criteria)
+
+
+class TestFolderCreate(SQLModel):
+    project_id: int
+    name: str
+    description: Optional[str] = None
+    folder_type: str = "regular"
+    parent_id: Optional[int] = None
+    smart_criteria: Optional[str] = None
+    order_index: int = 0
+
+
+class TestFolderRead(TestFolderBase):
+    id: int
+    project_id: int
+    parent_id: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+
+
+class TestFolderUpdate(SQLModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    parent_id: Optional[int] = None
+    order_index: Optional[int] = None
+    smart_criteria: Optional[str] = None
 
 
 # --- TestCase ---
@@ -111,7 +186,10 @@ class TestCaseBase(SQLModel):
     tags: Optional[str] = None  # JSON array
     fixture_ids: Optional[str] = None  # JSON array of fixture IDs
     priority: Priority = Priority.MEDIUM
-    status: TestCaseStatus = TestCaseStatus.ACTIVE
+    status: TestCaseStatus = TestCaseStatus.DRAFT
+    visibility: str = Field(default="public")  # "private" | "public"
+    folder_id: Optional[int] = Field(default=None, foreign_key="testfolder.id", index=True)
+    test_case_number: Optional[int] = None  # Auto-assigned: 1, 2, 3...
 
 
 class TestCase(TestCaseBase, table=True):
@@ -120,8 +198,10 @@ class TestCase(TestCaseBase, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     created_by: Optional[str] = None
+    approved_by: Optional[int] = None  # User ID when auth is implemented (Phase 3)
 
     project: Project = Relationship(back_populates="test_cases")
+    folder: Optional[TestFolder] = Relationship(back_populates="test_cases")
     test_runs: List["TestRun"] = Relationship(back_populates="test_case", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
     def get_steps(self) -> list:
@@ -159,6 +239,7 @@ class TestCaseRead(TestCaseBase):
     created_at: datetime
     updated_at: datetime
     created_by: Optional[str]
+    approved_by: Optional[int] = None
     fixture_ids: Optional[str] = None
 
 
@@ -168,6 +249,8 @@ class TestRunBase(SQLModel):
     trigger: RunTrigger = RunTrigger.MANUAL
     status: RunStatus = RunStatus.PENDING
     thread_id: Optional[str] = None
+    batch_label: Optional[str] = None
+    browser: Optional[str] = None  # Browser ID used for this run (e.g., "chromium", "firefox")
 
 
 class TestRun(TestRunBase, table=True):
@@ -256,15 +339,20 @@ class TestRunStepRead(TestRunStepBase):
 # --- Persona ---
 
 class PersonaBase(SQLModel):
-    name: str = Field(index=True)      # e.g., "admin", "readonly_user"
-    username: str
+    name: str = Field(index=True)      # e.g., "admin", "readonly_user", "stripe_api"
+    username: Optional[str] = None     # Required for login type, optional for others
     description: Optional[str] = None
+    credential_type: str = Field(default="login")  # login, api_key, token, custom
 
 
 class Persona(PersonaBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
-    encrypted_password: str            # Fernet-encrypted
+    environment_id: Optional[int] = Field(default=None, index=True)  # None = global
+    encrypted_password: Optional[str] = None   # Fernet-encrypted (login type)
+    encrypted_api_key: Optional[str] = None    # Fernet-encrypted (api_key type)
+    encrypted_token: Optional[str] = None      # Fernet-encrypted (token type)
+    encrypted_metadata: Optional[str] = None   # Fernet-encrypted JSON (custom type)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     project: "Project" = Relationship(back_populates="personas")
@@ -272,22 +360,32 @@ class Persona(PersonaBase, table=True):
 
 class PersonaCreate(PersonaBase):
     project_id: int
-    password: str                      # Plain text, encrypted before storage
+    environment_id: Optional[int] = None
+    password: Optional[str] = None     # Plain text for login type
+    api_key: Optional[str] = None      # Plain text for api_key type
+    token: Optional[str] = None        # Plain text for token type
+    custom_fields: Optional[dict] = None  # Key-value pairs for custom type
 
 
 class PersonaRead(PersonaBase):
     id: int
     project_id: int
+    environment_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
-    # Note: password never returned in API
+    # Note: secrets never returned in API
 
 
 class PersonaUpdate(SQLModel):
     name: Optional[str] = None
     username: Optional[str] = None
     description: Optional[str] = None
+    credential_type: Optional[str] = None
+    environment_id: Optional[int] = None
     password: Optional[str] = None     # Only update if provided
+    api_key: Optional[str] = None
+    token: Optional[str] = None
+    custom_fields: Optional[dict] = None
 
 
 # --- Page ---
@@ -621,3 +719,111 @@ class ScheduledRunRead(ScheduledRunBase):
     @field_serializer('started_at', 'completed_at', 'created_at')
     def serialize_dt(self, dt: Optional[datetime], _info) -> Optional[str]:
         return serialize_datetime_utc(dt)
+
+
+# --- TestData ---
+
+class TestDataBase(SQLModel):
+    name: str = Field(index=True)       # e.g., "valid_users", "product_ids"
+    description: Optional[str] = None
+    data: str                           # JSON string (object or array)
+    tags: Optional[str] = None          # JSON array for categorization
+
+
+class TestData(TestDataBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    environment_id: Optional[int] = Field(default=None, index=True)  # None = global
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    project: "Project" = Relationship(back_populates="test_data_items")
+
+    def get_data(self) -> any:
+        """Parse data JSON."""
+        return json.loads(self.data) if self.data else {}
+
+    def set_data(self, data: any):
+        """Set data as JSON."""
+        self.data = json.dumps(data)
+
+    def get_tags(self) -> list:
+        """Parse tags JSON."""
+        return json.loads(self.tags) if self.tags else []
+
+    def set_tags(self, tags: list):
+        """Set tags as JSON."""
+        self.tags = json.dumps(tags)
+
+
+class TestDataCreate(TestDataBase):
+    project_id: int
+    environment_id: Optional[int] = None
+
+
+class TestDataRead(TestDataBase):
+    id: int
+    project_id: int
+    environment_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TestDataUpdate(SQLModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    data: Optional[str] = None
+    tags: Optional[str] = None
+    environment_id: Optional[int] = None
+
+
+# --- Environment ---
+
+class Environment(SQLModel, table=True):
+    """Named environment per project (DEV, STAGING, PROD, FIT…).
+
+    Holds a base_url override and a JSON map of key-value variables
+    that can be referenced in steps as {{env.VAR_NAME}}.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    name: str = Field(index=True)           # e.g. "DEV", "STAGING", "PROD"
+    base_url: str                           # URL override for this environment
+    variables: str = Field(default="{}")   # JSON: {"KEY": "value", ...}
+    is_default: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    project: "Project" = Relationship(back_populates="environments")
+
+    def get_variables(self) -> dict:
+        return json.loads(self.variables) if self.variables else {}
+
+    def set_variables(self, vars_dict: dict):
+        self.variables = json.dumps(vars_dict)
+
+
+class EnvironmentCreate(SQLModel):
+    project_id: int
+    name: str
+    base_url: str
+    variables: Optional[dict] = None
+    is_default: bool = False
+
+
+class EnvironmentRead(SQLModel):
+    id: int
+    project_id: int
+    name: str
+    base_url: str
+    variables: str
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class EnvironmentUpdate(SQLModel):
+    name: Optional[str] = None
+    base_url: Optional[str] = None
+    variables: Optional[dict] = None
+    is_default: Optional[bool] = None
