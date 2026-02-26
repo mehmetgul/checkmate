@@ -97,6 +97,53 @@ def delete_test_case(
     return {"status": "deleted"}
 
 
+class StatusUpdateRequest(BaseModel):
+    status: str
+
+
+@router.patch("/{test_case_id}/status", response_model=TestCaseRead)
+def update_test_case_status(
+    test_case_id: int,
+    request: StatusUpdateRequest,
+    session: Session = Depends(get_session_dep),
+):
+    """Update test case status with transition validation.
+
+    Valid transitions:
+      draft -> ready (only if steps exist)
+      ready -> in_review
+      in_review -> approved or back to draft
+      any -> archived
+    """
+    try:
+        result = crud.update_test_case_status(session, test_case_id, request.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not result:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    return result
+
+
+class VisibilityUpdateRequest(BaseModel):
+    visibility: str  # "private" | "public"
+
+
+@router.patch("/{test_case_id}/visibility", response_model=TestCaseRead)
+def update_test_case_visibility(
+    test_case_id: int,
+    request: VisibilityUpdateRequest,
+    session: Session = Depends(get_session_dep),
+):
+    """Toggle test case visibility between private and public."""
+    try:
+        result = crud.update_test_case_visibility(session, test_case_id, request.visibility)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not result:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    return result
+
+
 # =============================================================================
 # Test Case Runs
 # =============================================================================
@@ -256,6 +303,12 @@ class RetryConfig(BaseModel):
     retry_mode: Literal["intelligent", "simple"] = "intelligent"  # intelligent uses LLM, simple always retries
 
 
+class ViewportConfig(BaseModel):
+    """Viewport size for browser."""
+    width: int = 1280
+    height: int = 720
+
+
 def _get_fixture_steps(
     session,
     test_case,
@@ -379,11 +432,15 @@ async def _execute_single_run(
     display_steps: list,
     browser: Optional[str],
     fixture_ids: Optional[list] = None,
+    viewport: Optional[dict] = None,
     retry_attempt: int = 0,
     max_retries: int = 0,
     original_run_id: Optional[int] = None,
     retry_mode: Optional[str] = None,
     retry_reason: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    batch_label: Optional[str] = None,
+    env_base_url: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Execute a single test run and yield SSE events.
 
@@ -404,6 +461,9 @@ async def _execute_single_run(
         test_case_id=test_case_id,
         trigger=RunTrigger.MANUAL,
         status=RunStatus.RUNNING,
+        thread_id=thread_id,
+        batch_label=batch_label,
+        browser=browser,
     ))
     crud.update_test_run(session, test_run.id, {
         "started_at": datetime.utcnow(),
@@ -425,6 +485,7 @@ async def _execute_single_run(
         retry_attempt=retry_attempt,
         max_retries=max_retries,
         original_run_id=original_run_id,
+        browser=browser,
     )
 
     pass_count = 0
@@ -465,13 +526,16 @@ async def _execute_single_run(
             yield sse_event("step_completed", step_number=i + 1, action=action, description=description, status=step_status.value, duration=step_duration, error=step_error, fixture_name=display_step.get("fixture_name"))
     else:
         # Execute via playwright-http (fixture steps are prepended, runs fresh every time)
-        logger.info(f"Executing via playwright-http: base_url={project.base_url}, steps={len(resolved_steps)}")
+        effective_base_url = env_base_url or project.base_url
+        logger.info(f"Executing via playwright-http: base_url={effective_base_url}, steps={len(resolved_steps)}")
         execution_options = {"screenshot_on_failure": True}
         if browser:
             execution_options["browser"] = browser
+        if viewport:
+            execution_options["viewport"] = viewport
 
         async for event in executor_client.execute_stream(
-            base_url=project.base_url,
+            base_url=effective_base_url,
             steps=resolved_steps,
             test_id=str(test_case_id),
             options=execution_options,
@@ -643,7 +707,9 @@ async def _execute_single_run(
 async def run_test_case_stream(
     test_case_id: int,
     browser: Optional[str] = None,
+    viewport: Optional[dict] = None,
     retry_config: Optional[RetryConfig] = None,
+    environment_id: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream test case execution results via SSE.
@@ -652,6 +718,7 @@ async def run_test_case_stream(
     Args:
         test_case_id: ID of test case to run
         browser: Optional browser ID (e.g., "chrome", "chromium-headless")
+        viewport: Optional viewport size {"width": int, "height": int}
         retry_config: Optional retry configuration
     """
     max_retries = retry_config.max_retries if retry_config else 0
@@ -674,6 +741,16 @@ async def run_test_case_stream(
                 yield sse_error("Project not found")
                 return
 
+            # Load active environment (if specified)
+            env_vars: dict = {}
+            env_base_url: Optional[str] = None
+            if environment_id:
+                env = crud.get_environment(session, environment_id)
+                if env and env.project_id == test_case.project_id:
+                    env_vars = env.get_variables()
+                    env_base_url = env.base_url
+                    logger.info(f"Using environment '{env.name}' (base_url={env_base_url})")
+
             # Parse steps from test case
             try:
                 steps_data = json.loads(test_case.steps) if isinstance(test_case.steps, str) else test_case.steps
@@ -688,8 +765,12 @@ async def run_test_case_stream(
                 logger.info("Playwright executor unavailable, using simulation mode")
                 yield sse_warning("Playwright executor unavailable, using simulation mode")
 
-            # Resolve persona/page references in steps
-            resolved_steps = resolve_references(session, test_case.project_id, steps_data)
+            # Resolve persona/page/env references in steps
+            resolved_steps = resolve_references(
+                session, test_case.project_id, steps_data,
+                env_vars=env_vars, override_base_url=env_base_url,
+                environment_id=environment_id,
+            )
             display_steps = mask_passwords_in_steps(resolved_steps)
 
             # Handle fixtures - prepend fixture steps to test steps (fresh every time)
@@ -737,12 +818,14 @@ async def run_test_case_stream(
                     resolved_steps=resolved_steps,
                     display_steps=display_steps,
                     browser=browser,
+                    viewport=viewport,
                     retry_attempt=current_attempt,
                     max_retries=max_retries,
                     original_run_id=original_run_id,
                     retry_mode=retry_mode if max_retries > 0 else None,
                     retry_reason=retry_reason,
                     fixture_ids=fixture_ids,
+                    env_base_url=env_base_url,
                 ):
                     # Check if this is the internal result
                     if event.startswith("{") and "_internal" in event:
@@ -822,7 +905,9 @@ async def run_test_case_stream(
 class RunTestCaseRequest(BaseModel):
     """Request body for running a test case."""
     browser: Optional[str] = None  # Browser ID (e.g., "chrome", "chromium-headless")
+    viewport: Optional[ViewportConfig] = None  # Browser viewport size
     retry: Optional[RetryConfig] = None  # Retry configuration
+    environment_id: Optional[int] = None  # Active environment ID
 
 
 @router.post("/{test_case_id}/runs/stream")
@@ -833,10 +918,14 @@ async def run_test_case_streaming(test_case_id: int, request: Optional[RunTestCa
 
     Optionally specify:
     - browser: Browser ID to use for execution
+    - viewport: Browser viewport size {width, height}
     - retry: Retry configuration with max_retries and retry_mode
+    - environment_id: Active environment whose base_url and variables override project defaults
     """
     browser = request.browser if request else None
+    viewport = request.viewport.model_dump() if request and request.viewport else None
     retry_config = request.retry if request else None
+    environment_id = request.environment_id if request else None
 
     # Validate intelligent retry mode is enabled
     if retry_config and retry_config.retry_mode == "intelligent" and not INTELLIGENT_RETRY_ENABLED:
@@ -846,7 +935,7 @@ async def run_test_case_streaming(test_case_id: int, request: Optional[RunTestCa
         )
 
     return StreamingResponse(
-        run_test_case_stream(test_case_id, browser=browser, retry_config=retry_config),
+        run_test_case_stream(test_case_id, browser=browser, viewport=viewport, retry_config=retry_config, environment_id=environment_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -862,17 +951,221 @@ async def run_test_case_streaming(test_case_id: int, request: Optional[RunTestCa
 class BatchRunRequest(BaseModel):
     """Request body for batch run."""
     test_case_ids: List[int]
-    browser: Optional[str] = None  # Browser ID (e.g., "chrome", "chromium-headless")
+    browser: Optional[str] = None  # Legacy single-browser ID (e.g., "chrome", "chromium-headless")
+    browsers: List[str] = []  # Multi-browser IDs for cross-browser execution (takes precedence over browser)
+    viewport: Optional[ViewportConfig] = None  # Browser viewport size
+    retry: Optional[RetryConfig] = None  # Retry configuration
+    parallel: int = 1  # Max concurrent tests per browser (1-5, default=1 = sequential)
+    environment_id: Optional[int] = None  # Active environment ID
+    context: Optional[str] = None  # Execution context label (e.g., "All Scenarios", folder name)
 
 
-async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: Optional[str] = None) -> AsyncGenerator[str, None]:
+def _enrich_event(sse_string: str, test_case_id: int, browser: Optional[str] = None) -> str:
+    """Inject test_case_id and browser into an SSE event for frontend correlation during parallel execution."""
+    if not sse_string.startswith("data: "):
+        return sse_string
+    try:
+        payload = json.loads(sse_string[6:].strip())
+        if "test_case_id" not in payload:
+            payload["test_case_id"] = test_case_id
+        if browser and "browser" not in payload:
+            payload["browser"] = browser
+        return f"data: {json.dumps(payload)}\n\n"
+    except (json.JSONDecodeError, ValueError):
+        return sse_string
+
+
+async def _run_browser_batch(
+    browser: str,
+    test_cases: list,
+    parallel: int,
+    event_queue: "asyncio.Queue",
+    counters: dict,
+    executor_client,
+    use_simulation: bool,
+    project,
+    batch_env_vars: dict,
+    batch_env_base_url: Optional[str],
+    environment_id: Optional[int],
+    max_retries: int,
+    retry_mode: str,
+    batch_id: str,
+    context: Optional[str],
+    viewport: Optional[dict],
+    project_id: int,
+) -> None:
+    """Execute all test cases for one browser, pushing SSE events to a shared queue.
+
+    Each browser gets its own asyncio.Semaphore for concurrency control.
+    Does NOT put a sentinel on the queue — the caller manages that.
+    counters dict is mutated directly (safe because asyncio is single-threaded cooperative).
+    """
+    semaphore = asyncio.Semaphore(parallel)
+
+    async def _run_worker(idx: int, test_case):
+        worker_session = Session(engine)
+        tc_id = test_case.id
+        try:
+            async with semaphore:
+                await event_queue.put(
+                    _enrich_event(
+                        sse_event("test_started", test_case_id=tc_id, name=test_case.name, index=idx + 1, total=len(test_cases)),
+                        tc_id, browser=browser,
+                    )
+                )
+
+                try:
+                    steps_data = json.loads(test_case.steps) if isinstance(test_case.steps, str) else test_case.steps
+                except json.JSONDecodeError:
+                    steps_data = []
+
+                if not steps_data:
+                    await event_queue.put(
+                        _enrich_event(
+                            sse_event("test_completed", test_case_id=tc_id, status="skipped", message="No steps defined"),
+                            tc_id, browser=browser,
+                        )
+                    )
+                    return
+
+                resolved_steps = resolve_references(worker_session, project_id, steps_data, env_vars=batch_env_vars, override_base_url=batch_env_base_url, environment_id=environment_id)
+                display_steps = mask_passwords_in_steps(resolved_steps)
+
+                original_run_id = None
+                current_attempt = 0
+                final_internal = None
+
+                while current_attempt <= max_retries:
+                    retry_reason = None
+                    internal_result = None
+
+                    async for event in _execute_single_run(
+                        session=worker_session,
+                        executor_client=executor_client,
+                        use_simulation=use_simulation,
+                        test_case=test_case,
+                        project=project,
+                        resolved_steps=resolved_steps,
+                        display_steps=display_steps,
+                        browser=browser,
+                        viewport=viewport,
+                        retry_attempt=current_attempt,
+                        max_retries=max_retries,
+                        original_run_id=original_run_id,
+                        retry_mode=retry_mode if max_retries > 0 else None,
+                        retry_reason=retry_reason,
+                        thread_id=batch_id,
+                        batch_label=context,
+                        env_base_url=batch_env_base_url,
+                    ):
+                        if event.startswith("{") and "_internal" in event:
+                            internal_result = json.loads(event)
+                        else:
+                            await event_queue.put(_enrich_event(event, tc_id, browser=browser))
+
+                    if not internal_result:
+                        break
+
+                    final_internal = internal_result
+                    counters["run_ids"].append(internal_result["run_id"])
+
+                    if original_run_id is None:
+                        original_run_id = internal_result["run_id"]
+
+                    if internal_result["status"] == "passed":
+                        break
+
+                    if current_attempt >= max_retries:
+                        break
+
+                    failure_info = internal_result.get("failure_info")
+
+                    if retry_mode == "intelligent" and failure_info:
+                        classification = await classify_failure(
+                            action=failure_info.get("action", ""),
+                            target=failure_info.get("target"),
+                            value=failure_info.get("value"),
+                            error_message=failure_info.get("error", ""),
+                            screenshot_b64=failure_info.get("screenshot"),
+                        )
+
+                        if not classification.is_retryable:
+                            logger.info(f"Batch retry skipped for tc {tc_id} on {browser}: {classification.failure_category}")
+                            await event_queue.put(_enrich_event(sse_event(
+                                "retry_skipped",
+                                test_case_id=tc_id,
+                                run_id=internal_result["run_id"],
+                                reason=f"Non-retryable: {classification.failure_category}",
+                                details=classification.reasoning,
+                                confidence=classification.confidence,
+                            ), tc_id, browser=browser))
+                            break
+
+                        retry_reason = f"{classification.failure_category}: {classification.reasoning}"
+                    else:
+                        retry_reason = "simple retry mode"
+
+                    current_attempt += 1
+                    logger.info(f"Batch retrying tc {tc_id} on {browser} (attempt {current_attempt + 1}/{max_retries + 1}): {retry_reason}")
+                    await event_queue.put(_enrich_event(sse_event(
+                        "test_retry",
+                        test_case_id=tc_id,
+                        run_id=internal_result["run_id"],
+                        attempt=current_attempt + 1,
+                        max_attempts=max_retries + 1,
+                        reason=retry_reason,
+                    ), tc_id, browser=browser))
+
+                if final_internal:
+                    if final_internal["status"] == "passed":
+                        counters["passed"] += 1
+                    else:
+                        counters["failed"] += 1
+
+                    await event_queue.put(_enrich_event(
+                        sse_event("test_completed", test_case_id=tc_id, run_id=final_internal["run_id"], status=final_internal["status"]),
+                        tc_id, browser=browser,
+                    ))
+
+        except Exception as worker_err:
+            logger.error(f"Worker error for tc {tc_id} on {browser}: {worker_err}")
+            await event_queue.put(_enrich_event(sse_error(f"Error running test case {tc_id}: {worker_err}"), tc_id, browser=browser))
+        finally:
+            try:
+                worker_session.commit()
+            except Exception:
+                worker_session.rollback()
+            worker_session.close()
+
+    tasks = [
+        asyncio.create_task(_run_worker(idx, tc))
+        for idx, tc in enumerate(test_cases)
+    ]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: Optional[str] = None, browsers: Optional[List[str]] = None, viewport: Optional[dict] = None, retry_config: Optional[RetryConfig] = None, parallel: int = 1, context: Optional[str] = None, environment_id: Optional[int] = None) -> AsyncGenerator[str, None]:
     """
     Stream batch test execution results via SSE.
-    Runs multiple test cases sequentially, streaming progress for each.
+    Supports per-test retry and optional multi-browser cross-browser execution.
+
+    `browsers` (multi-browser list) takes precedence over `browser` (legacy single).
+    `parallel` controls concurrency per browser — total sessions = N_tests × N_browsers × parallel.
+
+    Args:
+        browsers: List of browser IDs for cross-browser execution (preferred)
+        browser: Legacy single-browser ID (fallback when browsers is empty/None)
+        parallel: Max concurrent tests per browser (1 = sequential, 2-5 = parallel workers)
     """
     import uuid
 
-    logger.info(f"Starting batch execution: project_id={project_id}, test_cases={len(test_case_ids)}, browser={browser or 'default'}")
+    max_retries = retry_config.max_retries if retry_config else 0
+    retry_mode = retry_config.retry_mode if retry_config else "simple"
+
+    # Resolve effective browsers: new multi-browser list > legacy single > default
+    effective_browsers = browsers if browsers else ([browser] if browser else ["chromium"])
+
+    logger.info(f"Starting batch execution: project_id={project_id}, test_cases={len(test_case_ids)}, browsers={effective_browsers}, max_retries={max_retries}, mode={retry_mode}, parallel={parallel}")
     try:
         async with streaming_context() as (session, executor_client, use_simulation):
             # Verify project exists
@@ -880,6 +1173,16 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
             if not project:
                 yield sse_error("Project not found")
                 return
+
+            # Load active environment (if specified)
+            batch_env_vars: dict = {}
+            batch_env_base_url: Optional[str] = None
+            if environment_id:
+                env = crud.get_environment(session, environment_id)
+                if env and env.project_id == project_id:
+                    batch_env_vars = env.get_variables()
+                    batch_env_base_url = env.base_url
+                    logger.info(f"Batch using environment '{env.name}' (base_url={batch_env_base_url})")
 
             # Filter to valid test cases that belong to this project
             valid_test_cases = []
@@ -898,186 +1201,172 @@ async def run_batch_stream(project_id: int, test_case_ids: List[int], browser: O
 
             # Generate batch ID to group these runs
             batch_id = f"batch-{uuid.uuid4().hex[:8]}"
-            logger.info(f"Batch started: batch_id={batch_id}, test_cases={len(valid_test_cases)}")
+            total_tests = len(valid_test_cases) * len(effective_browsers)
+            logger.info(f"Batch started: batch_id={batch_id}, test_cases={len(valid_test_cases)}, browsers={effective_browsers}")
 
             # Send batch started event
-            yield sse_event("batch_started", batch_id=batch_id, total_tests=len(valid_test_cases), test_case_ids=[tc.id for tc in valid_test_cases])
+            yield sse_event("batch_started", batch_id=batch_id, total_tests=total_tests, browsers=effective_browsers, test_case_ids=[tc.id for tc in valid_test_cases])
 
-            batch_passed = 0
-            batch_failed = 0
-            run_ids = []
+            # Shared counters — safe without locks because asyncio is single-threaded cooperative
+            counters: dict = {"passed": 0, "failed": 0, "run_ids": []}
 
-            # Execute each test case
-            for idx, test_case in enumerate(valid_test_cases):
-                # Send test started event
-                yield sse_event("test_started", test_case_id=test_case.id, name=test_case.name, index=idx + 1, total=len(valid_test_cases))
+            if len(effective_browsers) == 1 and parallel <= 1:
+                # ── Sequential path (preserved for zero-regression on existing usage) ──
+                eff_browser = effective_browsers[0]
+                for idx, test_case in enumerate(valid_test_cases):
+                    yield sse_event("test_started", test_case_id=test_case.id, name=test_case.name, index=idx + 1, total=len(valid_test_cases))
 
-                # Parse steps
-                try:
-                    steps_data = json.loads(test_case.steps) if isinstance(test_case.steps, str) else test_case.steps
-                except json.JSONDecodeError:
-                    steps_data = []
+                    try:
+                        steps_data = json.loads(test_case.steps) if isinstance(test_case.steps, str) else test_case.steps
+                    except json.JSONDecodeError:
+                        steps_data = []
 
-                if not steps_data:
-                    yield sse_event("test_completed", test_case_id=test_case.id, status="skipped", message="No steps defined")
-                    continue
+                    if not steps_data:
+                        yield sse_event("test_completed", test_case_id=test_case.id, status="skipped", message="No steps defined")
+                        continue
 
-                # Resolve persona/page references
-                resolved_steps = resolve_references(session, project_id, steps_data)
-                # Create masked version for display (database storage)
-                display_steps = mask_passwords_in_steps(resolved_steps)
+                    resolved_steps = resolve_references(session, project_id, steps_data, env_vars=batch_env_vars, override_base_url=batch_env_base_url, environment_id=environment_id)
+                    display_steps = mask_passwords_in_steps(resolved_steps)
 
-                # Create test run with batch_id in thread_id
-                test_run = crud.create_test_run(session, TestRunCreate(
-                    project_id=project_id,
-                    test_case_id=test_case.id,
-                    trigger=RunTrigger.MANUAL,
-                    status=RunStatus.RUNNING,
-                    thread_id=batch_id,  # Store batch_id to identify suite runs
-                ))
-                crud.update_test_run(session, test_run.id, {"started_at": datetime.utcnow()})
-                run_ids.append(test_run.id)
+                    original_run_id = None
+                    current_attempt = 0
+                    final_internal = None
 
-                pass_count = 0
-                error_count = 0
+                    while current_attempt <= max_retries:
+                        retry_reason = None
 
-                if use_simulation:
-                    # Fallback: simulate execution
-                    for i, step_data in enumerate(resolved_steps):
-                        display_step = display_steps[i]  # Masked version for display
-                        action = step_data.get("action", "unknown")
-                        target = display_step.get("target")  # Masked
-                        value = display_step.get("value")  # Masked
-                        description = step_data.get("description", f"Step {i + 1}")
+                        internal_result = None
+                        async for event in _execute_single_run(
+                            session=session,
+                            executor_client=executor_client,
+                            use_simulation=use_simulation,
+                            test_case=test_case,
+                            project=project,
+                            resolved_steps=resolved_steps,
+                            display_steps=display_steps,
+                            browser=eff_browser,
+                            viewport=viewport,
+                            retry_attempt=current_attempt,
+                            max_retries=max_retries,
+                            original_run_id=original_run_id,
+                            retry_mode=retry_mode if max_retries > 0 else None,
+                            retry_reason=retry_reason,
+                            thread_id=batch_id,
+                            batch_label=context,
+                            env_base_url=batch_env_base_url,
+                        ):
+                            if event.startswith("{") and "_internal" in event:
+                                internal_result = json.loads(event)
+                            else:
+                                yield event
 
-                        yield sse_event("step_started", test_case_id=test_case.id, step_number=i + 1, action=action, description=description, fixture_name=display_step.get("fixture_name"))
-
-                        await asyncio.sleep(0.2)
-                        step_status = StepStatus.PASSED
-                        step_error = None
-                        step_duration = 100 + (i * 50)
-
-                        crud.create_test_run_step(session, TestRunStepCreate(
-                            test_run_id=test_run.id,
-                            test_case_id=test_case.id,
-                            step_number=i + 1,
-                            action=action,
-                            target=target,
-                            value=value,  # Masked value stored in DB
-                            status=step_status,
-                            duration=step_duration,
-                            error=step_error,
-                            fixture_name=display_step.get("fixture_name"),
-                        ))
-
-                        pass_count += 1
-
-                        yield sse_event("step_completed", test_case_id=test_case.id, step_number=i + 1, status=step_status.value, duration=step_duration, fixture_name=display_step.get("fixture_name"))
-                else:
-                    # Execute via playwright-http
-                    execution_options = {"screenshot_on_failure": True}
-                    if browser:
-                        execution_options["browser"] = browser
-
-                    async for event in executor_client.execute_stream(
-                        base_url=project.base_url,
-                        steps=resolved_steps,
-                        test_id=str(test_case.id),
-                        options=execution_options,
-                    ):
-                        event_type = event.get("type")
-
-                        if event_type == "error":
-                            yield sse_error(event.get("error", "Unknown executor error"))
-                            error_count += 1
+                        if not internal_result:
                             break
 
-                        elif event_type == "step_started":
-                            step_number = event.get("step_number", 0)
-                            # Use masked values from display_steps for frontend
-                            step_idx = step_number - 1
-                            display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
-                            masked_event = {
-                                **event,
-                                "test_case_id": test_case.id,
-                                "target": display_step.get("target"),
-                                "value": display_step.get("value"),
-                                "fixture_name": display_step.get("fixture_name"),
-                            }
-                            yield f"data: {json.dumps(masked_event)}\n\n"
+                        final_internal = internal_result
+                        counters["run_ids"].append(internal_result["run_id"])
 
-                        elif event_type == "step_completed":
-                            step_number = event.get("step_number", 0)
-                            status = event.get("status", "failed")
-                            step_status = StepStatus.PASSED if status == "passed" else StepStatus.FAILED
+                        if original_run_id is None:
+                            original_run_id = internal_result["run_id"]
 
-                            # Get step data for this step (use display_steps for masked values)
-                            step_idx = step_number - 1
-                            display_step = display_steps[step_idx] if step_idx < len(display_steps) else {}
+                        if internal_result["status"] == "passed":
+                            break
 
-                            # Create step record in DB with masked values
-                            crud.create_test_run_step(session, TestRunStepCreate(
-                                test_run_id=test_run.id,
-                                test_case_id=test_case.id,
-                                step_number=step_number,
-                                action=display_step.get("action", "unknown"),
-                                target=display_step.get("target"),
-                                value=display_step.get("value"),  # Masked value
-                                status=step_status,
-                                duration=event.get("duration", 0),
-                                error=event.get("error"),
-                                screenshot=event.get("screenshot"),
-                                fixture_name=display_step.get("fixture_name"),
-                            ))
+                        if current_attempt >= max_retries:
+                            break
 
-                            if step_status == StepStatus.PASSED:
-                                pass_count += 1
-                            else:
-                                error_count += 1
+                        failure_info = internal_result.get("failure_info")
 
-                            # Use masked values for frontend
-                            masked_event = {
-                                **event,
-                                "test_case_id": test_case.id,
-                                "target": display_step.get("target"),
-                                "value": display_step.get("value"),
-                                "fixture_name": display_step.get("fixture_name"),
-                            }
-                            yield f"data: {json.dumps(masked_event)}\n\n"
+                        if retry_mode == "intelligent" and failure_info:
+                            classification = await classify_failure(
+                                action=failure_info.get("action", ""),
+                                target=failure_info.get("target"),
+                                value=failure_info.get("value"),
+                                error_message=failure_info.get("error", ""),
+                                screenshot_b64=failure_info.get("screenshot"),
+                            )
 
-                        elif event_type == "completed":
-                            # Executor signals completion for this test case
-                            pass
+                            if not classification.is_retryable:
+                                logger.info(f"Batch retry skipped for tc {test_case.id}: {classification.failure_category}")
+                                yield sse_event(
+                                    "retry_skipped",
+                                    test_case_id=test_case.id,
+                                    run_id=internal_result["run_id"],
+                                    reason=f"Non-retryable: {classification.failure_category}",
+                                    details=classification.reasoning,
+                                    confidence=classification.confidence,
+                                )
+                                break
 
-                # Update test run with consistent summary format
-                final_status = RunStatus.PASSED if error_count == 0 else RunStatus.FAILED
-                executed_count = pass_count + error_count
-                skipped_count = len(resolved_steps) - executed_count
-                if skipped_count > 0:
-                    summary = f"Executed {executed_count} of {len(resolved_steps)} steps: {pass_count} passed, {error_count} failed, {skipped_count} skipped"
-                else:
-                    summary = f"Executed {len(resolved_steps)} steps: {pass_count} passed, {error_count} failed"
-                crud.update_test_run(session, test_run.id, {
-                    "status": final_status,
-                    "completed_at": datetime.utcnow(),
-                    "pass_count": pass_count,
-                    "error_count": error_count,
-                    "summary": summary,
-                })
+                            retry_reason = f"{classification.failure_category}: {classification.reasoning}"
+                        else:
+                            retry_reason = "simple retry mode"
 
-                if final_status == RunStatus.PASSED:
-                    batch_passed += 1
-                else:
-                    batch_failed += 1
+                        current_attempt += 1
+                        logger.info(f"Batch retrying tc {test_case.id} (attempt {current_attempt + 1}/{max_retries + 1}): {retry_reason}")
+                        yield sse_event(
+                            "test_retry",
+                            test_case_id=test_case.id,
+                            run_id=internal_result["run_id"],
+                            attempt=current_attempt + 1,
+                            max_attempts=max_retries + 1,
+                            reason=retry_reason,
+                        )
 
-                logger.info(f"Test case {test_case.id} completed: status={final_status.value}, passed={pass_count}, failed={error_count}")
+                    if final_internal:
+                        if final_internal["status"] == "passed":
+                            counters["passed"] += 1
+                        else:
+                            counters["failed"] += 1
 
-                # Send test completed event
-                yield sse_event("test_completed", test_case_id=test_case.id, run_id=test_run.id, status=final_status.value, pass_count=pass_count, error_count=error_count)
+                        yield sse_event("test_completed", test_case_id=test_case.id, run_id=final_internal["run_id"], status=final_internal["status"])
+
+            else:
+                # ── Parallel / multi-browser path ──
+                # Each browser gets its own _run_browser_batch task with its own Semaphore.
+                # All SSE events flow into one shared queue → single stream to the frontend.
+                event_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+
+                browser_tasks = [
+                    asyncio.create_task(_run_browser_batch(
+                        browser=b,
+                        test_cases=valid_test_cases,
+                        parallel=parallel,
+                        event_queue=event_queue,
+                        counters=counters,
+                        executor_client=executor_client,
+                        use_simulation=use_simulation,
+                        project=project,
+                        batch_env_vars=batch_env_vars,
+                        batch_env_base_url=batch_env_base_url,
+                        environment_id=environment_id,
+                        max_retries=max_retries,
+                        retry_mode=retry_mode,
+                        batch_id=batch_id,
+                        context=context,
+                        viewport=viewport,
+                        project_id=project_id,
+                    ))
+                    for b in effective_browsers
+                ]
+
+                # Sentinel: wait for all browser tasks, then close the queue
+                async def _sentinel():
+                    await asyncio.gather(*browser_tasks, return_exceptions=True)
+                    await event_queue.put(None)
+
+                asyncio.create_task(_sentinel())
+
+                # Drain the queue and yield events
+                while True:
+                    event = await event_queue.get()
+                    if event is None:
+                        break
+                    yield event
 
             # Send batch completed event
-            logger.info(f"Batch completed: batch_id={batch_id}, passed={batch_passed}, failed={batch_failed}")
-            yield sse_event("batch_completed", passed=batch_passed, failed=batch_failed, total=len(valid_test_cases), run_ids=run_ids)
+            logger.info(f"Batch completed: batch_id={batch_id}, passed={counters['passed']}, failed={counters['failed']}, browsers={effective_browsers}")
+            yield sse_event("batch_completed", passed=counters["passed"], failed=counters["failed"], total=total_tests, run_ids=counters["run_ids"], browsers=effective_browsers)
 
     except SQLAlchemyError as e:
         logger.error(f"Database error in run_batch_stream: {e}")
@@ -1098,10 +1387,31 @@ async def run_batch_streaming(project_id: int, request: BatchRunRequest):
     Execute multiple test cases with SSE streaming.
     Returns step-by-step results for each test case in real-time.
 
-    Optionally specify a browser to use for execution.
+    Optionally specify a browser and retry configuration.
     """
+    retry_config = request.retry
+
+    # Validate intelligent retry mode is enabled
+    if retry_config and retry_config.retry_mode == "intelligent" and not INTELLIGENT_RETRY_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="Intelligent retry is not enabled on this deployment. Use retry_mode='simple' or contact your administrator."
+        )
+
+    parallel = max(1, min(request.parallel, 5))
+
     return StreamingResponse(
-        run_batch_stream(project_id, request.test_case_ids, browser=request.browser),
+        run_batch_stream(
+            project_id,
+            request.test_case_ids,
+            browser=request.browser,
+            browsers=request.browsers if request.browsers else None,
+            viewport=request.viewport.model_dump() if request.viewport else None,
+            retry_config=retry_config,
+            parallel=parallel,
+            context=request.context,
+            environment_id=request.environment_id,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

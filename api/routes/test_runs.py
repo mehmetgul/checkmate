@@ -101,6 +101,7 @@ def list_test_runs(
             trigger=run.trigger,
             status=run.status,
             thread_id=run.thread_id,
+            batch_label=run.batch_label,
             started_at=run.started_at,
             completed_at=run.completed_at,
             summary=run.summary,
@@ -112,6 +113,7 @@ def list_test_runs(
             original_run_id=run.original_run_id,
             retry_mode=run.retry_mode,
             retry_reason=run.retry_reason,
+            browser=run.browser,
             test_case_name=test_case_name,
         ))
 

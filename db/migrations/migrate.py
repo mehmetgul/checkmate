@@ -112,8 +112,11 @@ def main():
         print("No migrations needed for new databases.")
         return
 
-    # Get all SQL migration files
-    migration_files = sorted(migrations_dir.glob("*.sql"))
+    # Get all SQL migration files (skip *_postgres.sql — those are for PostgreSQL only)
+    migration_files = sorted(
+        f for f in migrations_dir.glob("*.sql")
+        if not f.name.endswith("_postgres.sql")
+    )
 
     if not migration_files:
         print("No migration files found.")
